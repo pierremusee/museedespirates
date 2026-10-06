@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.reservation_item import FreeProfile
-from app.models.session import Session
+from app.models.session import LATE_TOLERANCE, Session
 from app.models.ticket import Ticket, TicketType
 from app.models.ticket_access import TicketAccess
 from app.schemas.ticket import (
@@ -18,9 +18,6 @@ from app.schemas.ticket import (
 )
 
 MUSEUM_TZ = ZoneInfo("Europe/Paris")
-
-# Tolérance après le début de séance — au-delà, le billet est refusé.
-LATE_TOLERANCE = timedelta(minutes=30)
 
 FREE_WARNINGS = {
     FreeProfile.UNDER_4: "GRATUIT — Moins de 4 ans (vérifier l'âge)",

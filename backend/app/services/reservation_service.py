@@ -26,7 +26,7 @@ from app.models.reservation import (
     SalesChannel,
 )
 from app.models.reservation_item import FreeProfile, ReservationItem
-from app.models.session import Session
+from app.models.session import LATE_TOLERANCE, Session
 from app.models.ticket import Ticket, TicketCategory, TicketType
 from app.models.ticket_access import TicketAccess
 from app.schemas.reservation import (
@@ -35,7 +35,6 @@ from app.schemas.reservation import (
     ReservationItemCreate,
 )
 from app.services.pricing import MODIFIER_FAMILY, individual_modifier, is_high_season
-from app.services.ticket_service import LATE_TOLERANCE
 
 MUSEUM_TZ = ZoneInfo("Europe/Paris")
 

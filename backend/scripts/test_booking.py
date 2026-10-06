@@ -643,6 +643,28 @@ async def main() -> None:
     assert s_exp == 400, f"vente d'une séance expirée acceptée ({s_exp})"
     print("=> OK : séance expirée refusée à la vente")
 
+    # Contrat API pour les clients : `is_expired` est calculé côté
+    # serveur (Session.is_expired) — le POS grise sans dupliquer la règle.
+    # (la séance +3 h peut tomber sur le lendemain en fin de journée)
+    tomorrow = str(date.today() + timedelta(days=1))
+    body = [
+        *json.loads(
+            urllib.request.urlopen(f"{BASE_URL}/events?date={today}").read()
+        ),
+        *json.loads(
+            urllib.request.urlopen(f"{BASE_URL}/events?date={tomorrow}").read()
+        ),
+    ]
+    flags = {
+        s["id"]: s["is_expired"]
+        for e in body for s in e["sessions"]
+    }
+    assert flags.get(ids["recent"]) is False
+    assert flags.get(ids["expired"]) is True
+    assert flags.get(ids["today"]) is False
+    assert flags.get(ids["today2"]) is False
+    print("=> OK : is_expired exposé (tolérance=False, expirée=True, futures=False)")
+
 
 async def run() -> None:
     try:

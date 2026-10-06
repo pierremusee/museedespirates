@@ -41,6 +41,7 @@ type SessionOption = {
   label: string;
   show: string;
   remaining: number;
+  expired: boolean;
 };
 
 type Product = {
@@ -230,7 +231,9 @@ function autoSessions(
 ): string[] {
   const need = sessionCountOf(product);
   if (need === 0) return [];
-  const available = sessions.filter((s) => s.remaining > 0).map((s) => s.id);
+  const available = sessions
+    .filter((s) => s.remaining > 0 && !s.expired)
+    .map((s) => s.id);
   const picks = available.slice(0, need);
   while (picks.length < need) picks.push("");
   return picks;
@@ -241,7 +244,9 @@ function autoSessionExcluding(
   exclude: string[]
 ): string {
   return (
-    sessions.find((s) => s.remaining > 0 && !exclude.includes(s.id))?.id ?? ""
+    sessions.find(
+      (s) => s.remaining > 0 && !s.expired && !exclude.includes(s.id)
+    )?.id ?? ""
   );
 }
 
@@ -514,6 +519,7 @@ export function PosTerminal({
           id: string;
           start_time: string;
           remaining_capacity: number;
+          is_expired: boolean;
         }[];
       }[] = await evRes.json();
       const timeFmt = new Intl.DateTimeFormat("fr-FR", {
@@ -529,6 +535,7 @@ export function PosTerminal({
             label: timeFmt.format(new Date(s.start_time)),
             show: e.title,
             remaining: s.remaining_capacity,
+            expired: s.is_expired,
           }))
         )
         .sort((a, b) => a.startTime.localeCompare(b.startTime));
@@ -921,11 +928,13 @@ export function PosTerminal({
                   value={s.id}
                   disabled={
                     s.remaining === 0 ||
+                    s.expired ||
                     (l.sessionIds.includes(s.id) &&
                       l.sessionIds[i] !== s.id)
                   }
                 >
-                  {s.label} — {s.show} ({s.remaining} pl.)
+                  {s.label} — {s.show} (
+                  {s.expired ? "terminée" : `${s.remaining} pl.`})
                 </option>
               ))}
             </select>

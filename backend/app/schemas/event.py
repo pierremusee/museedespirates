@@ -14,6 +14,7 @@ class SessionRead(BaseModel):
     max_capacity: int
     booked_seats: int
     remaining_capacity: int
+    is_expired: bool
 
 
 class EventRead(BaseModel):

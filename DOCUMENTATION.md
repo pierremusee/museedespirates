@@ -190,7 +190,9 @@ pending ──(solde = 0 via payments, ou total = 0 €)──> confirmed  → b
   `LATE_TOLERANCE` (30 min, partagée avec le contrôle d'accès) est passé
   ne peut plus être vendue → `400`, quel que soit le canal. Une séance
   commencée mais encore dans la tolérance reste vendable — cohérent avec
-  le scan qui l'accepterait encore.
+  le scan qui l'accepterait encore. La même propriété `Session.is_expired`
+  (modèle) est exposée par `GET /events` (`SessionRead.is_expired`) : le
+  POS grise les séances expirées sans dupliquer la règle.
 - Panier à 0 € (DFC n°6) : confirmation immédiate sans encaissement.
 - TTL panier : 15 min (`PENDING_TTL`) ; purge périodique toutes les 60 s dans
   le lifespan FastAPI + endpoint `POST /admin/reservations/purge`.
@@ -334,6 +336,16 @@ docker compose up -d                          # PostgreSQL :5432
 # Backend (depuis backend/, venv activé)
 ./venv/Scripts/python.exe scripts/seed_db.py      # seed idempotent
 uvicorn app.main:app --reload                     # API :8000
+
+# Backend — redémarrage propre (PowerShell) : tuer l'écouteur par PORT
+# puis relancer détaché. Ne pas filtrer les processus par nom : le
+# worker réel est un enfant spawn_main sans « uvicorn » en ligne de
+# commande (voir §12 — gotcha).
+$p = (Get-NetTCPConnection -LocalPort 8000 -State Listen).OwningProcess
+Stop-Process -Id $p -Force
+Start-Process -FilePath ".\venv\Scripts\python.exe" `
+  -ArgumentList "-m","uvicorn","app.main:app","--reload" `
+  -WorkingDirectory "C:\Users\pierr\dev\musee\backend" -WindowStyle Hidden
 ./venv/Scripts/python.exe scripts/test_booking.py # suite E2E
 ./venv/Scripts/python.exe scripts/test_concurrency.py  # preuve concurrence (M1)
 alembic revision --autogenerate -m "..."          # nouvelle migration
@@ -447,9 +459,12 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   séance et PMR par ligne ; bannière « Convertir en Pass 1 Spectacle »
   avec économie calculée quand musée + séance coexistent à l'unité.
 - ✅ **Fenêtre de vente des séances** (2026-10-06) : refus serveur (400)
-  si `start_time + 30 min` est dépassé — la tolérance `LATE_TOLERANCE` du
-  contrôle d'accès est réutilisée (moteur unique). Cas testés : vendue et
-  scannée dans la tolérance, refusée une fois expirée.
+  si `start_time + 30 min` est dépassé — la tolérance `LATE_TOLERANCE`
+  vit désormais sur le modèle `Session` (source unique vente + contrôle +
+  API). `Session.is_expired` est exposée par `GET /events` : le POS
+  désactive les séances expirées dans le sélecteur (« terminée ») sans
+  réimplémenter la règle. Cas testés : vendue et scannée dans la
+  tolérance, refusée une fois expirée, flag vérifié sur 4 séances.
 - ✅ **Fixtures de test auto-désactivées** (2026-10-06) : teardown
   `cleanup()` dans `test_booking.py` et `test_concurrency.py` — les
   produits/événements « (test) » et `concurrency_*` ne polluent plus
@@ -514,9 +529,14 @@ Apple/Google Wallet).
   périmètre.
 - `TicketScanRequest` : pas d'authentification sur les endpoints (dev only,
   CORS ouvert).
-- Gotcha uvicorn : un redémarrage peut laisser un worker orphelin (le
-  filtre par nom de process ne le voit pas) — kill par PID puis relance
-  détachée (`Start-Process`).
+- Gotcha uvicorn : sous Windows, `--reload` crée une chaîne reloader →
+  worker → `spawn_main` ; tuer le parent laisse le petit-fils orphelin
+  **qui continue de servir l'ancien code** sur :8000 (constaté : vente
+  d'une séance expirée encore acceptée après le patch). Le filtre par
+  nom ne le voit pas — identifier l'écouteur par le port
+  (`Get-NetTCPConnection -LocalPort 8000`), kill par PID, relance
+  détachée (voir §9). Symptôme type : l'API répond mais ignore le code
+  frais → suspecter un vieux worker avant de déboguer.
 - Gotcha Windows : une stratégie de contrôle d'application (WDAC) a bloqué
   `_greenlet.pyd` du venv → tout endpoint DB en 500. Résolu par
   `pip install --force-reinstall --no-cache-dir greenlet` (binaire frais,

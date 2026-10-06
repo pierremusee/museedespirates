@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer
@@ -10,6 +10,11 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.event import Event
     from app.models.ticket_access import TicketAccess
+
+# Tolérance après le début de séance : fenêtre commune à la vente
+# (reservation_service), au contrôle d'accès (ticket_service) et à
+# l'API (is_expired exposé via SessionRead).
+LATE_TOLERANCE = timedelta(minutes=30)
 
 
 class Session(Base):
@@ -42,3 +47,10 @@ class Session(Base):
     @property
     def remaining_capacity(self) -> int:
         return self.max_capacity - self.booked_seats
+
+    @property
+    def is_expired(self) -> bool:
+        """Début + tolérance dépassé : ni vendable ni scannable."""
+        return (
+            datetime.now(timezone.utc) > self.start_time + LATE_TOLERANCE
+        )

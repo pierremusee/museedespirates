@@ -17,6 +17,7 @@ type SessionRead = {
   id: string;
   start_time: string;
   remaining_capacity: number;
+  is_expired: boolean;
 };
 
 type EventRead = {
@@ -47,6 +48,7 @@ export function extractTheaterSessions(events: EventRead[]) {
         label: timeFormatter.format(new Date(s.start_time)),
         show: e.title,
         remaining: s.remaining_capacity,
+        expired: s.is_expired,
       }))
     )
     .sort((a, b) => a.startTime.localeCompare(b.startTime));
