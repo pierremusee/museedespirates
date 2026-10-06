@@ -169,6 +169,9 @@ Event (supersédé par products) → `d38f51a62b90` catalogue produits →
   **triées par id** (anti-deadlock).
 - Contrainte SQL `booked_seats <= max_capacity` en filet de sécurité.
 - Une commande `pending` tient la jauge ; la purge la libère.
+- **Démontré sous concurrence** (2026-10-06, `test_concurrency.py`) :
+  30 requêtes simultanées sur jauge 5 → 5 acceptées, 25 rejets 400,
+  `booked_seats = 5`, zéro dépassement.
 
 ### Cycle de vie d'une réservation
 
@@ -255,6 +258,8 @@ validation `model_validator`).
   présenté à plusieurs postes (conséquence voulue du modèle polymorphique).
 - Verrou `SELECT ... FOR UPDATE` sur les accès → deux douchettes simultanées
   se sérialisent, la seconde voit l'accès consommé (anti double-scan).
+  **Démontré** (`test_concurrency.py`) : 8 scans concurrents du même accès
+  → 1 seul accepté, 7 rejets 400.
 - `control_warning` remonté pour les profils gratuits (via l'item ancre).
 - Réponse = accès validé (`access_label`) + liste complète des accès du billet.
 
@@ -312,6 +317,7 @@ docker compose up -d                          # PostgreSQL :5432
 ./venv/Scripts/python.exe scripts/seed_db.py      # seed idempotent
 uvicorn app.main:app --reload                     # API :8000
 ./venv/Scripts/python.exe scripts/test_booking.py # suite E2E
+./venv/Scripts/python.exe scripts/test_concurrency.py  # preuve concurrence (M1)
 alembic revision --autogenerate -m "..."          # nouvelle migration
 alembic upgrade head
 
@@ -323,8 +329,14 @@ npx tsc --noEmit
 
 `test_booking.py` couvre : panier mixte + paiement CB, haute saison,
 cohérence visit_date, scans (musée/séance/double-scan/autre jour),
-surbooking, multi-paiements POS (cash+ANCV, chèque réservé groupes),
-seuil groupe ≥ 8, `extra_show` fusionné, purge des paniers expirés.
+surbooking séquentiel (rejet 400 asserté), multi-paiements POS (cash+ANCV,
+chèque réservé groupes), seuil groupe ≥ 8, `extra_show` fusionné, purge des
+paniers expirés.
+
+`test_concurrency.py` (M1) démontre sous concurrence réelle (threads +
+barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
+→ exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
+accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
 
 **Catalogue seedé** (basse saison) : `museum_entry` 12/8/9 €,
 `theater_show` 10/7/8 €, `extra_show` 5/3,50/4 € (**add-on** : séance
@@ -455,6 +467,10 @@ Apple/Google Wallet).
 - Gotcha uvicorn : un redémarrage peut laisser un worker orphelin (le
   filtre par nom de process ne le voit pas) — kill par PID puis relance
   détachée (`Start-Process`).
+- Gotcha Windows : une stratégie de contrôle d'application (WDAC) a bloqué
+  `_greenlet.pyd` du venv → tout endpoint DB en 500. Résolu par
+  `pip install --force-reinstall --no-cache-dir greenlet` (binaire frais,
+  non issu du cache).
 - Canal en ligne volontairement **partiel** : la Taverne (flux libre) ne
   passe pas par la réservation en ligne.
 

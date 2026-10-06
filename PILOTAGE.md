@@ -30,31 +30,31 @@ que les tests présents ; une simulation n'est pas une expérience réelle.
 | Niveau (OBJECTIFS.md §20) | Statut |
 |---|---|
 | 1 — Fonctionnel | **Atteint** : parcours web complets, E2E verte, scan validé physiquement |
-| 2 — Robuste | **Entamé** : règles métier testées ; concurrence implémentée mais non démontrée ; paiements sans machine à états |
+| 2 — Robuste | **Entamé** : règles métier testées ; concurrence **démontrée** (M1, 2026-10-06) ; paiements sans machine à états |
 | 3 — Professionnel | Non atteint : sécurité absente, pas de CI, observabilité quasi nulle |
 | 4 — Production simulée | Non atteint |
 | 5 — Référence portfolio | Non atteint : pas de README racine, un tiers ne peut pas installer seul |
 
-## Milestone courant — M1 : démontrer la concurrence
+## Milestone courant
 
-**Problème traité** : le claim central du projet (anti-surbooking, Point 13 du
-cahier des charges + §5 d'OBJECTIFS.md) est implémenté (`FOR UPDATE` trié,
-contrainte `booked_seats <= max_capacity`) mais n'a **aucune preuve
-concurrentielle** — le test 5 de `test_booking.py` est séquentiel et sa
-seconde requête n'a pas d'assertion.
+**M1 — démontrer la concurrence : terminé, en attente de validation.**
 
-**Périmètre (volontairement borné)** : démontrer le comportement du mécanisme
-existant, pas construire une infrastructure de tests de charge.
+Preuve : `backend/scripts/test_concurrency.py` — 30 requêtes concurrentes
+sur jauge 5 → exactement 5 × 201, `booked_seats == 5`, zéro dépassement ;
+8 scans concurrents du même accès → 1 seul × 200. Commande :
+`./venv/Scripts/python.exe scripts/test_concurrency.py` (depuis `backend/`).
+L'assertion manquante du test 5 (`test_booking.py`) a été ajoutée.
+Statut du mécanisme anti-surbooking : **démontré + reproductible**.
+Prochain milestone : M2 (CI minimale) — ne démarre qu'après validation.
 
-**Critères de sortie** :
+<details><summary>Critères de M1 (tous remplis)</summary>
 
-- Un test lance N requêtes concurrentes sur une séance de capacité K et
-  vérifie : exactement K succès, zéro dépassement, `booked_seats == K`.
-- Un test lance 2 scans simultanés du même accès → exactement un accepté.
-- Le test séquentiel existant (test 5) gagne une assertion sur le rejet.
-- La suite est lançable par une commande unique, reproductible.
+- [x] N concurrent sur capacité K → K succès, zéro dépassement
+- [x] Scans simultanés du même accès → 1 seul accepté
+- [x] Assertion ajoutée au test séquentiel existant
+- [x] Reproductible en une commande (3 runs consécutifs verts)
 
-**Preuve attendue** : sortie de test consignée (dans la PR de clôture).
+</details>
 
 ## Prochains milestones (ordre indicatif)
 
@@ -70,11 +70,9 @@ Le backlog détaillé des chantiers (A–D) et la boîte à idées restent dans
 
 ## Écarts et risques principaux
 
-1. Anti-surbooking non prouvé (objet de M1).
-2. Aucune reproductibilité automatisée (pas de CI ; la suite E2E exige une
-   stack lancée à la main et écrit directement en base).
+1. ~~Anti-surbooking non prouvé~~ → démontré par M1 (2026-10-06).
+2. Aucune reproductibilité automatisée (pas de CI ; les suites exigent une
+   stack lancée à la main et écrivent directement en base).
 3. Pas de README racine → un tiers ne peut pas installer le projet.
 4. Sécurité absente (aucune auth, CORS ouvert) — assumé « dev only », mais
    bloque le Niveau 3.
-5. Doc-drift mineur : `DOCUMENTATION.md` annonce « 9 versions » de
-   migrations ; il y en a 12.
