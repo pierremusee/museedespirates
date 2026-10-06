@@ -55,6 +55,14 @@ Next.js :3000 ──HTTP──> FastAPI :8000 ──asyncpg──> PostgreSQL :5
 
 **CORS** : ouvert (`*`) — environnement de dev uniquement.
 
+**Dépôt GitHub** : `github.com/pierremusee/museedespirates` (branche `main`,
+compte dédié `pierremusee` — séparé du compte perso `pierrusthemaboul`).
+Auth : PAT fine-grained stocké dans Git Credential Manager pour
+`pierremusee@github.com` (remote `https://pierremusee@github.com/...` →
+isolation par repo, aucun mélange de credentials avec l'autre compte) ;
+commandes `gh` API via `GH_TOKEN` lu depuis `C:\Users\pierr\github-token.txt.txt`.
+Commits signés `pierremusee <338410385+pierremusee@users.noreply.github.com>`.
+
 ---
 
 ## 3. Arborescence
