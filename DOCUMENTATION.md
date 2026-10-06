@@ -351,6 +351,16 @@ barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
 → exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
 accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
 
+**Cycle de vie des fixtures** (2026-10-06) : `test_booking.py` et
+`test_concurrency.py` activent leurs objets de test au seed (`is_active`)
+et les **désactivent en fin de run** (`finally` → `cleanup()`) — le
+catalogue vu par `/products` et `/events` (donc `/reserver`, `/caisse`,
+`/scanner`) reste propre entre les runs. `test_concurrency.py` réaligne
+aussi le composant `museum_day` de `concurrency_museum` sur son événement
+dédié : `test_booking.py` re-pointe indifféremment tous les composants
+musée vers « Musée des Pirates », chaque script restaure donc ses propres
+invariants au seed.
+
 **Catalogue seedé** (basse saison) : `museum_entry` 12/8/9 €,
 `theater_show` 10/7/8 €, `extra_show` 5/3,50/4 € (**add-on** : séance
 supplémentaire, exige un billet/pass à séance dans la commande),
@@ -427,6 +437,11 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   présent, sinon reprise de la composition du panier ; contrôles capacité
   séance et PMR par ligne ; bannière « Convertir en Pass 1 Spectacle »
   avec économie calculée quand musée + séance coexistent à l'unité.
+- ✅ **Fixtures de test auto-désactivées** (2026-10-06) : teardown
+  `cleanup()` dans `test_booking.py` et `test_concurrency.py` — les
+  produits/événements « (test) » et `concurrency_*` ne polluent plus
+  `/reserver`, `/caisse` ni `/scanner` entre les runs ; M1 vérifié
+  reproductible sur runs consécutifs.
 - ✅ **Billets format carte** (2026-10-06) : `TicketCard` CR80 partagé
   `/succes` + `/caisse` — QR + catégorie + accès datés + référence courte ;
   impression navigateur avec masquage du reste de page (`print:hidden`).
@@ -467,11 +482,16 @@ Apple/Google Wallet).
 
 ## 12. Dette technique & résidus connus
 
-- Doublons d'événements de test en base (`Musée (test)`, `Théâtre (test)` ×5) —
-  désactivés (`is_active=false`), **non supprimés** (choix non destructif).
-  `test_booking.py` en réactive un à chaque run (ses séances doivent être
-  réservables) — le repasser inactif après coup si le catalogue doit
-  rester propre.
+- Doublons d'événements de test en base (`Musée (test)` ×5,
+  `Théâtre (test)` ×5, `Concurrence *` ×2) — désactivés
+  (`is_active=false`), **non supprimés** (choix non destructif). Depuis
+  2026-10-06 les scripts de test désactivent leurs fixtures en fin de run
+  (`cleanup()`) et les réactivent au seed : le catalogue reste propre sans
+  intervention manuelle. Limite assumée : un `kill -9` en plein run laisse
+  les fixtures actives jusqu'au run suivant.
+- `SeasonalPeriod` « HS test » : un doublon ajouté à chaque run de
+  `test_booking.py` (mêmes dates que la vraie haute saison) — sans effet
+  fonctionnel ni visibilité, accumulation interne seulement.
 - Le scan ne vérifie pas `reservation.status` — à durcir si annulation/
   remboursement post-confirmation est ajouté.
 - `booked_seats` = personnes ≠ `COUNT(tickets)` après fusion gloutonne.
@@ -515,6 +535,10 @@ Apple/Google Wallet).
 - Séparation stricte : idées (boîte à idées) ≠ règles ≠ backlog.
 - Enums PostgreSQL stockés en `str` via `values_callable` — migrations
   Alembic à générer par `--autogenerate` depuis `backend/`.
+- **Un script de test laisse le catalogue comme il l'a trouvé** : fixtures
+  activées au seed, désactivées en fin de run (`finally`/`cleanup()`),
+  jamais de suppression ; chaque script restaure ses propres invariants au
+  seed (ex. composants repointés par un autre script).
 
 ### Règle de mise à jour
 

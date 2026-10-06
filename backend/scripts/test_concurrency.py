@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -129,6 +129,27 @@ async def seed() -> dict:
         db.add_all(
             p for code, p in wanted.items() if code not in existing
         )
+        # Réactivation non destructive : les fixtures sont désactivées en
+        # fin de run (cleanup), donc le seed doit les rendre vendables.
+        await db.execute(
+            update(Product)
+            .where(Product.code.in_(list(wanted)))
+            .values(is_active=True)
+        )
+        # Le composant musée du produit test doit viser l'événement dédié —
+        # test_booking.py realigne les composants museum_day sur le vrai
+        # musée, ce qui casserait le checkpoint de scan sinon.
+        await db.execute(
+            update(ProductComponent)
+            .where(
+                ProductComponent.component_type == ComponentType.MUSEUM_DAY,
+                ProductComponent.product_id
+                == select(Product.id)
+                .where(Product.code == "concurrency_museum")
+                .scalar_subquery(),
+            )
+            .values(event_id=musee.id)
+        )
         await db.commit()
         ids = {
             "session": str(session.id),
@@ -136,6 +157,38 @@ async def seed() -> dict:
         }
     await engine.dispose()
     return ids
+
+
+async def cleanup() -> None:
+    """Retire les fixtures du catalogue visible : le script laisse la base
+    comme il l'a trouvée. Désactivation non destructive (is_active=False) —
+    les lignes restent en base et le seed les réactive au run suivant."""
+    engine = create_async_engine(settings.DATABASE_URL)
+    maker = async_sessionmaker(engine, class_=AsyncSession)
+    async with maker() as db:
+        await db.execute(
+            update(Product)
+            .where(
+                Product.code.in_(
+                    ["concurrency_theater", "concurrency_museum"]
+                )
+            )
+            .values(is_active=False)
+        )
+        await db.execute(
+            update(Event)
+            .where(
+                Event.title.in_(
+                    [
+                        "Concurrence Théâtre (test)",
+                        "Concurrence Musée (test)",
+                    ]
+                )
+            )
+            .values(is_active=False)
+        )
+        await db.commit()
+    await engine.dispose()
 
 
 def concurrent(calls: int, fn):
@@ -229,5 +282,12 @@ async def main() -> None:
     print("\nM1 — concurrence démontrée : anti-surbooking + anti double-scan.")
 
 
+async def run() -> None:
+    try:
+        await main()
+    finally:
+        await cleanup()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run())

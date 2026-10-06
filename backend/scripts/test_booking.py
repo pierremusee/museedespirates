@@ -176,6 +176,14 @@ async def seed() -> dict:
         db.add_all(
             p for code, p in wanted.items() if code not in existing_codes
         )
+        # Réactivation non destructive : les fixtures « (test) » sont
+        # désactivées en fin de run (cleanup) — seul `group_visit` est
+        # un produit dédié au test ; le reste du catalogue est réel.
+        await db.execute(
+            update(Product)
+            .where(Product.code == "group_visit")
+            .values(is_active=True)
+        )
         db.add(SeasonalPeriod(name="HS test", start_date=date(2026, 7, 1), end_date=date(2026, 8, 31)))
         await db.commit()
         ids = {
@@ -190,6 +198,29 @@ async def seed() -> dict:
         }
     await engine.dispose()
     return ids
+
+
+async def cleanup() -> None:
+    """Retire les fixtures « (test) » du catalogue visible : le script
+    laisse la base comme il l'a trouvée. Désactivation non destructive
+    (is_active=False) — le seed les réactive au run suivant. Les
+    événements réels (« Musée des Pirates », les pièces du Kraken) et
+    les produits du catalogue ne sont jamais touchés."""
+    engine = create_async_engine(settings.DATABASE_URL)
+    sm = async_sessionmaker(engine, class_=AsyncSession)
+    async with sm() as db:
+        await db.execute(
+            update(Event)
+            .where(Event.title.like("%(test)%"))
+            .values(is_active=False)
+        )
+        await db.execute(
+            update(Product)
+            .where(Product.code == "group_visit")
+            .values(is_active=False)
+        )
+        await db.commit()
+    await engine.dispose()
 
 
 def post(url: str, payload: dict | None = None) -> tuple[int, dict]:
@@ -563,5 +594,12 @@ async def main() -> None:
         pay(resa10["id"], "cb", resa10["total_price"])
 
 
+async def run() -> None:
+    try:
+        await main()
+    finally:
+        await cleanup()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run())
