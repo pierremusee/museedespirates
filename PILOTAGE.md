@@ -37,7 +37,7 @@ que les tests présents ; une simulation n'est pas une expérience réelle.
 
 ## Milestone courant
 
-**M1 — démontrer la concurrence : terminé, en attente de validation.**
+**M1 — démontrer la concurrence : terminé et validé (2026-10-06).**
 
 Preuve : `backend/scripts/test_concurrency.py` — 30 requêtes concurrentes
 sur jauge 5 → exactement 5 × 201, `booked_seats == 5`, zéro dépassement ;
