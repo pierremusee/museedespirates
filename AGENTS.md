@@ -33,6 +33,33 @@ Un objectif n'est jamais atteint parce qu'il est documenté. Les statuts de
 reproductible) doivent refléter des preuves identifiables (test, commande,
 PR), pas des intentions.
 
+## Mode analyse d'idée
+
+Déclencheur : Pierre expose explicitement une nouvelle idée produit ou
+fonctionnelle (formulation du type « j'ai une idée »).
+
+Règles du mode :
+
+- Aucun fichier modifié, aucun code écrit — laisser l'idée s'exposer
+  librement, sans exiger de spécification technique.
+- Consulter `DOCUMENTATION.md` et le code réel avant de conclure ; la
+  mémoire Honcho n'est utilisée que si elle apporte un contexte pertinent.
+- Analyser : valeur produit, valeur métier, valeur démonstrative portfolio,
+  existant, dépendances, implications (architecture/données/API/frontend),
+  risques, risque d'enfermement ou de complication d'évolutions futures
+  **plausibles**, coût/complexité, pistes de simplification.
+- Ne pas transformer l'idée en tâche, milestone ou backlog sans accord.
+- Proposer le plus petit périmètre permettant de tester l'idée ; comparer
+  brièvement les architectures possibles et recommander la plus simple qui
+  préserve les évolutions plausibles.
+- Ne pas créer d'abstraction « au cas où » : identifier uniquement les
+  contraintes futures plausibles réellement affectées par l'idée.
+- Verdict obligatoire parmi : « Faisable maintenant » / « À préparer » /
+  « À garder » / « À éviter », avec justification.
+- « À garder » aboutit, si Pierre le confirme, à une ligne dans la boîte à
+  idées de `DOCUMENTATION.md` — jamais à un milestone automatique.
+- L'implémentation ne démarre que sur accord explicite de Pierre.
+
 ## Conventions du projet
 
 - Nomenclature : « **le Complexe** » désigne uniquement l'ensemble
