@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -28,7 +29,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { TicketQR } from "@/app/(client)/succes/ticket-qr";
+import { TicketCard } from "@/components/ticket-card";
+import { PrintTicketsButton } from "@/components/print-tickets-button";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -134,12 +136,6 @@ const PAYMENT_METHODS: {
   { key: "check", label: "Chèque", icon: FileText },
 ];
 
-const TICKET_TYPE_LABELS: Record<string, string> = {
-  open_ticket: "Musée",
-  session_standard: "Théâtre",
-  session_dining: "Dîner-spectacle",
-};
-
 const PAID_TARIFFS: Tariff[] = ["adult", "child", "reduced"];
 const FREE_PROFILE_TARIFFS: Tariff[] = [
   "under_4",
@@ -160,12 +156,6 @@ const TARIFF_SHORT: Record<Tariff, string> = {
 const eurFormatter = new Intl.NumberFormat("fr-FR", {
   style: "currency",
   currency: "EUR",
-});
-
-const dateTimeFormatter = new Intl.DateTimeFormat("fr-FR", {
-  dateStyle: "short",
-  timeStyle: "short",
-  timeZone: "Europe/Paris",
 });
 
 // ---------------------------------------------------------------------------
@@ -947,7 +937,7 @@ export function PosTerminal({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 print:hidden">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Caisse</h1>
           <p className="text-sm text-muted-foreground">
@@ -991,7 +981,7 @@ export function PosTerminal({
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr_1fr]">
+      <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr_1fr] print:hidden">
         {/* ------------------------------ Produits ------------------------- */}
         <Card>
           <CardHeader className="pb-3">
@@ -1310,46 +1300,23 @@ export function PosTerminal({
       </div>
 
       {showTickets && tickets.length > 0 && (
-        <Card>
-          <CardHeader className="pb-3">
+        <Card className="print:gap-0 print:py-0 print:ring-0">
+          <CardHeader className="pb-3 print:hidden">
             <CardTitle className="text-base">
               {tickets.length} billet{tickets.length > 1 ? "s" : ""} émis
             </CardTitle>
+            <CardAction>
+              <PrintTicketsButton label="Imprimer" />
+            </CardAction>
           </CardHeader>
-          <CardContent>
-            <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-4">
+          <CardContent className="print:px-0">
+            <div className="flex flex-wrap gap-4">
               {tickets.map((t) => (
-                <div
+                <TicketCard
                   key={t.id}
-                  className="flex flex-col items-center gap-2 rounded-lg border p-3"
-                >
-                  <div className="rounded bg-white p-1.5">
-                    <TicketQR value={t.id} />
-                  </div>
-                  <p className="text-center text-xs">
-                    {t.ticket_category}
-                    {t.accesses.map((a) => (
-                      <span
-                        key={a.id}
-                        className="block text-muted-foreground"
-                      >
-                        {TICKET_TYPE_LABELS[a.access_type] ?? a.access_type}
-                        {a.session_event_title
-                          ? ` — ${a.session_event_title}`
-                          : ""}
-                        {a.session_start
-                          ? ` — ${dateTimeFormatter.format(
-                              new Date(a.session_start)
-                            )}`
-                          : a.valid_date
-                            ? ` — ${new Date(
-                                `${a.valid_date}T12:00:00`
-                              ).toLocaleDateString("fr-FR")}`
-                            : ""}
-                      </span>
-                    ))}
-                  </p>
-                </div>
+                  ticket={t}
+                  reservationRef={order?.id}
+                />
               ))}
             </div>
           </CardContent>

@@ -10,7 +10,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { TicketQR } from "./ticket-qr";
+import { TicketCard } from "@/components/ticket-card";
+import { PrintTicketsButton } from "@/components/print-tickets-button";
 
 type AccessRead = {
   id: string;
@@ -48,26 +49,6 @@ type ReservationRead = {
   items: ItemRead[];
   tickets: TicketRead[];
 };
-
-const CATEGORY_LABELS: Record<TicketRead["ticket_category"], string> = {
-  adult: "Adulte",
-  child: "Enfant",
-  reduced: "Tarif réduit",
-  group: "Groupe",
-  school: "Scolaire",
-};
-
-const TYPE_LABELS: Record<AccessRead["access_type"], string> = {
-  open_ticket: "Musée",
-  session_standard: "Théâtre",
-  session_dining: "Dîner-spectacle",
-};
-
-const dateTimeFormatter = new Intl.DateTimeFormat("fr-FR", {
-  dateStyle: "short",
-  timeStyle: "short",
-  timeZone: "Europe/Paris",
-});
 
 const FREE_PROFILE_LABELS: Record<string, string> = {
   under_4: "moins de 4 ans",
@@ -121,7 +102,7 @@ export default async function SuccesPage({
 
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-10">
-      <Card>
+      <Card className="print:hidden">
         <CardHeader className="items-center text-center">
           <CircleCheck className="mb-2 size-12 text-green-600" aria-hidden />
           <CardTitle className="text-2xl">Réservation confirmée</CardTitle>
@@ -174,53 +155,25 @@ export default async function SuccesPage({
           <p className="mb-6 text-center text-xs text-muted-foreground">
             Référence : <span className="font-mono">{reservation.id}</span>
           </p>
-          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {reservation.tickets.map((ticket) => (
-              <div
-                key={ticket.id}
-                className="flex flex-col items-center gap-3 rounded-lg border p-4"
-              >
-                <div className="rounded-md bg-white p-2">
-                  <TicketQR value={ticket.id} />
-                </div>
-                <div className="text-center">
-                  <p className="text-sm font-medium">
-                    {CATEGORY_LABELS[ticket.ticket_category]}
-                  </p>
-                  <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
-                    {ticket.accesses.map((a) => (
-                      <li key={a.id}>
-                        {TYPE_LABELS[a.access_type]}
-                        {a.session_event_title
-                          ? ` — ${a.session_event_title}`
-                          : ""}
-                        {a.session_start
-                          ? ` — ${dateTimeFormatter.format(
-                              new Date(a.session_start)
-                            )}`
-                          : a.valid_date
-                            ? ` — ${new Date(
-                                `${a.valid_date}T12:00:00`
-                              ).toLocaleDateString("fr-FR")}`
-                            : ""}
-                        {a.is_scanned && " (utilisé)"}
-                      </li>
-                    ))}
-                  </ul>
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {ticket.id.slice(0, 8)}…
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
         </CardContent>
-        <CardFooter className="justify-center">
+        <CardFooter className="justify-center gap-2">
+          {reservation.tickets.length > 0 && <PrintTicketsButton />}
           <Button asChild variant="outline">
             <Link href="/reserver">Retour à la billetterie</Link>
           </Button>
         </CardFooter>
       </Card>
+      {reservation.tickets.length > 0 && (
+        <div className="mt-6 flex flex-wrap justify-center gap-4">
+          {reservation.tickets.map((ticket) => (
+            <TicketCard
+              key={ticket.id}
+              ticket={ticket}
+              reservationRef={reservation.id}
+            />
+          ))}
+        </div>
+      )}
     </main>
   );
 }

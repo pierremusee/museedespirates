@@ -128,3 +128,12 @@
     @apply font-sans;
   }
 }
+
+/* Impression fidèle des billets carte (couleurs, fond du QR, liserés). */
+@media print {
+  .ticket-card,
+  .ticket-card * {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+}

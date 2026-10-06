@@ -98,10 +98,12 @@ musee/
     │   ├── page.tsx                  # accueil
     │   ├── layout.tsx                # Geist + Toaster (sonner)
     │   ├── (client)/reserver/        # page + date-picker + dialog
-    │   ├── (client)/succes/          # confirmation + QR codes
+    │   ├── (client)/succes/          # confirmation + cartes-billets
     │   └── (admin)/scanner/          # contrôle d'accès QR
     │   └── (admin)/caisse/           # terminal POS (pos-terminal.tsx)
     ├── components/ui/                # shadcn/ui
+    ├── components/                   # ticket-card, ticket-qr,
+    │                                 # print-tickets-button (partagés)
     └── lib/utils.ts
 ```
 
@@ -298,9 +300,20 @@ serveur (`cache: "no-store"`) sur `NEXT_PUBLIC_API_URL`.
 | `/reserver` | `(client)/reserver/page.tsx` | Server Component : catalogue produits en cartes, séances du jour, badge haute saison, sold-out. `?date=` pilote le jour. |
 | | `date-picker.tsx` | Calendrier shadcn + popover + date-fns (fr) → pousse `?date=`. |
 | | `reservation-dialog.tsx` | Client : compteurs par tarif + profils gratuits, choix de séance(s), séance supplémentaire `extra_show` fusionnée, estimation live (re-calculée serveur), POST reservation + paiement CB simulé, redirect `/succes`. |
-| `/succes` | `(client)/succes/page.tsx` | Confirmation : lignes, total, référence, **1 QR par billet** (`ticket-qr.tsx` → qrcode.react) + liste des accès. |
+| `/succes` | `(client)/succes/page.tsx` | Confirmation : lignes, total, référence, puis **cartes-billets** (`TicketCard`) + bouton « Imprimer les billets ». |
 | `/scanner` | `(admin)/scanner/page.tsx` | Client : sélecteur de poste (entrée musée / séances du jour), `@yudiel/react-qr-scanner`, verdict vert/rouge, warning justificatif, droits restants. |
-| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` (~1150 lignes) | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), miroir de la composition du panier à l'ajout d'un produit, suggestion « Pass 1 Spectacle » quand musée + séance sont vendus à l'unité (`passSuggestion`/`convertToPass`), séance supplémentaire par ligne (`addExtraShow`), multi-paiements avec rendu, annulation « Modifier la commande », impression QR. |
+| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` (~1150 lignes) | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), miroir de la composition du panier à l'ajout d'un produit, suggestion « Pass 1 Spectacle » quand musée + séance sont vendus à l'unité (`passSuggestion`/`convertToPass`), séance supplémentaire par ligne (`addExtraShow`), multi-paiements avec rendu, annulation « Modifier la commande », émission/impression des cartes-billets. |
+
+**Billet carte (CR80, 85,6 × 54 mm)** — composant partagé
+`components/ticket-card.tsx` : QR (`ticket-qr.tsx`, ~23 mm, jeton =
+`ticket.id`), catégorie, accès réservés avec libellés et dates
+(`session_event_title` / `session_start` / `valid_date`), référence commande
+courte (8 premiers hex de `reservation.id`, format `XXXX-XXXX`). Utilisé par
+`/succes` et `/caisse`. Impression = `window.print()` ; les pages hôtes
+masquent tout sauf les cartes via `print:hidden` (Tailwind), rendu couleur
+fidèle forcé par `print-color-adjust` dans `globals.css`. Pagination native
+du flux (pas de positionnement absolu) → les commandes nombreuses
+(groupes) s'impriment sur plusieurs pages.
 
 Conventions front : Server Components par défaut, `"use client"` minimal ;
 formatage `Intl` en `fr-FR` / `Europe/Paris` ; types API recopiés localement.
@@ -414,6 +427,9 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   présent, sinon reprise de la composition du panier ; contrôles capacité
   séance et PMR par ligne ; bannière « Convertir en Pass 1 Spectacle »
   avec économie calculée quand musée + séance coexistent à l'unité.
+- ✅ **Billets format carte** (2026-10-06) : `TicketCard` CR80 partagé
+  `/succes` + `/caisse` — QR + catégorie + accès datés + référence courte ;
+  impression navigateur avec masquage du reste de page (`print:hidden`).
 - ✅ **Grille tarifaire cohérente** (2026-10-06) : `Product.is_addon`
   (migration `e6b3f1a84c2d`) + règle serveur de couverture des droits —
   `extra_show` ne peut plus être vendu sans billet/pass à séance dans la
@@ -443,7 +459,8 @@ séances/visites en anglais ; vente B2B (scolaires, CE, TO) avec devis/acompte ;
 POS 100 % modulaire (configuration-driven UI) ; page d'accueil « coupe-file »
 live (spectacle imminent + places restantes, QR sur affiches physiques) ;
 module SAV/remboursements ; gestion de stock restaurant ; confirmation
-d'achat (billet PDF téléchargeable, lien unique de consultation,
+d'achat (billet PDF téléchargeable — partiellement couvert par
+l'impression navigateur des `TicketCard`, lien unique de consultation,
 Apple/Google Wallet).
 
 ---
@@ -473,6 +490,9 @@ Apple/Google Wallet).
   non issu du cache).
 - Canal en ligne volontairement **partiel** : la Taverne (flux libre) ne
   passe pas par la réservation en ligne.
+- Impression des billets = impression **navigateur** (papier A4) — pas
+  d'intégration imprimante carte/thermique ; le format CR80 est prêt si un
+  pilote dédié arrive.
 
 ---
 
