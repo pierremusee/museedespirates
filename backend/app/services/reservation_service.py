@@ -35,6 +35,7 @@ from app.schemas.reservation import (
     ReservationItemCreate,
 )
 from app.services.pricing import MODIFIER_FAMILY, individual_modifier, is_high_season
+from app.services.ticket_service import LATE_TOLERANCE
 
 MUSEUM_TZ = ZoneInfo("Europe/Paris")
 
@@ -402,11 +403,23 @@ async def create_reservation(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Séance introuvable",
             )
+        now = datetime.now(timezone.utc)
         for session in sessions.values():
             if not session.event.is_active:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Événement inactif, réservation impossible",
+                )
+            # Même fenêtre que le contrôle d'accès : une séance dont le
+            # début + tolérance est dépassé ne peut plus être vendue,
+            # quel que soit le canal (web, caisse…).
+            if now > session.start_time + LATE_TOLERANCE:
+                start_paris = session.start_time.astimezone(MUSEUM_TZ)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Séance du {start_paris.strftime('%d/%m/%Y')} "
+                    f"à {start_paris.strftime('%Hh%M')} déjà passée — "
+                    "vente impossible",
                 )
 
     # Événements liés aux accès Musée (open_ticket) — contrôle is_active.

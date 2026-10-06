@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
@@ -51,8 +51,10 @@ BASE_URL = "http://127.0.0.1:8000"
 MUSEUM_TZ = ZoneInfo("Europe/Paris")
 UTC = ZoneInfo("UTC")
 
-LOW_DAY = date(2026, 10, 15)   # basse saison
-HIGH_DAY = date(2026, 7, 15)   # haute saison
+# Jours relatifs — la vente d'une séance expirée est refusée : les
+# séances du test doivent rester dans le futur.
+LOW_DAY = date.today() + timedelta(days=9)    # basse saison (hors « HS test »)
+HIGH_DAY = date.today() + timedelta(days=45)  # couvert par « HS test » du seed
 
 
 def session_at(day: date, hour: int, minute: int = 0) -> datetime:
@@ -132,7 +134,19 @@ async def seed() -> dict:
             start_time=datetime.now(UTC) + timedelta(hours=3),
             max_capacity=10,
         )
-        db.add_all([s1, s2, s3, tiny, today_sess, today_sess2])
+        # Fenêtre de vente = tolérance du contrôle (30 min) : une séance
+        # commencée depuis 20 min (vendable) et une expirée (refusée).
+        recent = Session(
+            event_id=kraken.id,
+            start_time=datetime.now(UTC) - timedelta(minutes=20),
+            max_capacity=10,
+        )
+        expired = Session(
+            event_id=kraken.id,
+            start_time=datetime.now(UTC) - timedelta(hours=1),
+            max_capacity=10,
+        )
+        db.add_all([s1, s2, s3, tiny, today_sess, today_sess2, recent, expired])
 
         def simple(code, label, a, c, r, comps):
             return Product(
@@ -184,7 +198,17 @@ async def seed() -> dict:
             .where(Product.code == "group_visit")
             .values(is_active=True)
         )
-        db.add(SeasonalPeriod(name="HS test", start_date=date(2026, 7, 1), end_date=date(2026, 8, 31)))
+        # Fenêtre haute saison de test recalée à chaque run pour couvrir
+        # HIGH_DAY (les anciennes « HS test » sont supprimées — fixtures
+        # jetables, le vrai « Haute saison — Été » n'est pas touché).
+        await db.execute(
+            delete(SeasonalPeriod).where(SeasonalPeriod.name == "HS test")
+        )
+        db.add(SeasonalPeriod(
+            name="HS test",
+            start_date=HIGH_DAY - timedelta(days=15),
+            end_date=HIGH_DAY + timedelta(days=15),
+        ))
         await db.commit()
         ids = {
             "s1": str(s1.id),
@@ -193,6 +217,8 @@ async def seed() -> dict:
             "tiny": str(tiny.id),
             "today": str(today_sess.id),
             "today2": str(today_sess2.id),
+            "recent": str(recent.id),
+            "expired": str(expired.id),
             "musee": str(musee.id),
             "kraken": str(kraken.id),
         }
@@ -592,6 +618,30 @@ async def main() -> None:
 
         print("   Paiement sur commande expirée (doit être refusé) :")
         pay(resa10["id"], "cb", resa10["total_price"])
+
+    print("\nTest 10 — fenêtre de vente d'une séance (règle commune au scan) :")
+    # Séance future : déjà démontrée par toutes les ventes ci-dessus.
+    # Séance commencée il y a 20 min (tolérance 30 min) → vendue + scannable.
+    s_rec, resa_rec = post(f"{BASE_URL}/reservations", {
+        "customer_email": "juste.a.temps@blackpearl.fr",
+        "items": [{"product_code": "theater_show", "category": "adult",
+                   "session_id": ids["recent"]}],
+    })
+    assert s_rec == 201, f"séance dans la tolérance refusée à la vente ({s_rec})"
+    s_pr, paid_rec = pay(resa_rec["id"], "cb", resa_rec["total_price"])
+    assert s_pr == 201 and paid_rec["reservation_status"] == "confirmed"
+    s_scan, _ = scan(paid_rec["tickets"][0]["id"], {"session_id": ids["recent"]})
+    assert s_scan == 200, f"scan d'une séance dans la tolérance refusé ({s_scan})"
+    print("=> OK : séance dans la tolérance vendue et scannée")
+
+    # Séance expirée (début + 30 min < now) → vente refusée.
+    s_exp, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "trop.tard@blackpearl.fr",
+        "items": [{"product_code": "theater_show", "category": "adult",
+                   "session_id": ids["expired"]}],
+    })
+    assert s_exp == 400, f"vente d'une séance expirée acceptée ({s_exp})"
+    print("=> OK : séance expirée refusée à la vente")
 
 
 async def run() -> None:

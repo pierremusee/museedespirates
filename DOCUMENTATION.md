@@ -186,6 +186,11 @@ pending ──(solde = 0 via payments, ou total = 0 €)──> confirmed  → b
 
 - **Émission différée** (DFC n°7) : les billets ne sont émis que lorsque
   `amount_due` atteint 0 → `confirmed`. Séance supprimée entre-temps → `409`.
+- **Fenêtre de vente des séances** : une séance dont le début +
+  `LATE_TOLERANCE` (30 min, partagée avec le contrôle d'accès) est passé
+  ne peut plus être vendue → `400`, quel que soit le canal. Une séance
+  commencée mais encore dans la tolérance reste vendable — cohérent avec
+  le scan qui l'accepterait encore.
 - Panier à 0 € (DFC n°6) : confirmation immédiate sans encaissement.
 - TTL panier : 15 min (`PENDING_TTL`) ; purge périodique toutes les 60 s dans
   le lifespan FastAPI + endpoint `POST /admin/reservations/purge`.
@@ -344,7 +349,11 @@ npx tsc --noEmit
 cohérence visit_date, scans (musée/séance/double-scan/autre jour),
 surbooking séquentiel (rejet 400 asserté), multi-paiements POS (cash+ANCV,
 chèque réservé groupes), seuil groupe ≥ 8, `extra_show` fusionné, purge des
-paniers expirés.
+paniers expirés, fenêtre de vente des séances (tolérance vendue+scannée,
+expirée refusée). Jours de test **relatifs** (`LOW_DAY`=J+9, `HIGH_DAY`=J+45
+couvert par une période « HS test » recalée à chaque run) — nécessaire
+depuis la règle de vente des séances : des dates figées finiraient
+expirées.
 
 `test_concurrency.py` (M1) démontre sous concurrence réelle (threads +
 barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
@@ -437,6 +446,10 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   présent, sinon reprise de la composition du panier ; contrôles capacité
   séance et PMR par ligne ; bannière « Convertir en Pass 1 Spectacle »
   avec économie calculée quand musée + séance coexistent à l'unité.
+- ✅ **Fenêtre de vente des séances** (2026-10-06) : refus serveur (400)
+  si `start_time + 30 min` est dépassé — la tolérance `LATE_TOLERANCE` du
+  contrôle d'accès est réutilisée (moteur unique). Cas testés : vendue et
+  scannée dans la tolérance, refusée une fois expirée.
 - ✅ **Fixtures de test auto-désactivées** (2026-10-06) : teardown
   `cleanup()` dans `test_booking.py` et `test_concurrency.py` — les
   produits/événements « (test) » et `concurrency_*` ne polluent plus
