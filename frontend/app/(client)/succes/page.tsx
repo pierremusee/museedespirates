@@ -20,6 +20,7 @@ type AccessRead = {
   valid_date: string | null;
   is_scanned: boolean;
   session_start: string | null;
+  session_event_title: string | null;
 };
 
 type TicketRead = {
@@ -190,6 +191,9 @@ export default async function SuccesPage({
                     {ticket.accesses.map((a) => (
                       <li key={a.id}>
                         {TYPE_LABELS[a.access_type]}
+                        {a.session_event_title
+                          ? ` — ${a.session_event_title}`
+                          : ""}
                         {a.session_start
                           ? ` — ${dateTimeFormatter.format(
                               new Date(a.session_start)

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.reservation_item import FreeProfile
+from app.models.session import Session
 from app.models.ticket import Ticket, TicketType
 from app.models.ticket_access import TicketAccess
 from app.schemas.ticket import (
@@ -83,7 +84,9 @@ async def scan_ticket(
     # billet se sérialisent ici — la seconde voit l'accès déjà consommé.
     result = await db.execute(
         select(TicketAccess)
-        .options(selectinload(TicketAccess.session))
+        .options(
+            selectinload(TicketAccess.session).selectinload(Session.event)
+        )
         .where(TicketAccess.ticket_id == ticket.id)
         .with_for_update()
     )
@@ -144,7 +147,10 @@ async def scan_ticket(
             )
         start_paris = session.start_time.astimezone(MUSEUM_TZ)
         session_start = session.start_time
-        access_label = f"{access_label} — Séance de {_fr(start_paris)}"
+        access_label = (
+            f"{access_label} — {session.event.title}"
+            f" — Séance de {_fr(start_paris)}"
+        )
 
         if start_paris.date() != today:
             raise HTTPException(

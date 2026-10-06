@@ -59,3 +59,11 @@ class TicketAccess(Base):
         # si la séance n'a pas été chargée en eager.
         session = self.__dict__.get("session")
         return session.start_time if session else None
+
+    @property
+    def session_event_title(self) -> str | None:
+        # Titre de la production (ex. pièce de théâtre) de la séance —
+        # None si la relation n'a pas été chargée en eager.
+        session = self.__dict__.get("session")
+        event = session.__dict__.get("event") if session else None
+        return event.title if event else None

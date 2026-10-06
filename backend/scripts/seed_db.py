@@ -29,6 +29,41 @@ from app.models import (
 
 MUSEUM_TZ = ZoneInfo("Europe/Paris")
 
+# Programme du Théâtre du Kraken : chaque production est un événement
+# `theater` porteur de ses propres séances à heure fixe (jauge 80).
+SHOWS = [
+    {
+        "title": "À l'Abordage !",
+        # Renommage 2026-10-06 (ex « Le Dernier Voyage du Black Kraken »).
+        "former": "Le Dernier Voyage du Black Kraken",
+        "description": (
+            "Alors que le Black Kraken s'apprête à quitter le port pour sa "
+            "dernière traversée, son capitaine reçoit une mystérieuse lettre "
+            "qui pourrait bouleverser son destin. Entre mutinerie, chasse au "
+            "trésor et secrets de famille, l'équipage devra choisir entre la "
+            "fortune et la liberté. Une aventure théâtrale mêlant suspense, "
+            "humour et grands récits de piraterie."
+        ),
+        "hour": 10,
+        "minute": 30,
+    },
+    {
+        "title": "Les Conjurés",
+        # Renommage 2026-10-06 (ex « La Malédiction de l'Île aux Brumes »).
+        "former": "La Malédiction de l'Île aux Brumes",
+        "description": (
+            "Une légende raconte qu'un trésor oublié repose sur une île qui "
+            "n'apparaît sur aucune carte. Lorsqu'un jeune équipage découvre "
+            "par hasard sa position, il se lance à sa recherche. Mais l'île "
+            "semble vivante et chaque énigme les rapproche un peu plus d'une "
+            "ancienne malédiction. Un spectacle familial mêlant aventure, "
+            "magie, humour et effets scéniques."
+        ),
+        "hour": 15,
+        "minute": 0,
+    },
+]
+
 
 def session_at(day: date, hour: int, minute: int = 0) -> datetime:
     """Séance à heure fixe Europe/Paris, convertie en UTC."""
@@ -61,26 +96,80 @@ async def main() -> None:
                 event_type=EventType.PERMANENT_EXHIBITION,
             )
             db.add(musee)
-        if kraken is None:
-            kraken = Event(
-                title="Théâtre du Kraken",
-                event_type=EventType.THEATER,
-            )
-            db.add(kraken)
-            await db.flush()
 
-            # Théâtre : séances à 10h30 et 15h00 sur les 7 prochains jours.
-            today = datetime.now(MUSEUM_TZ).date()
+        # Productions en carte : un événement `theater` par pièce, avec sa
+        # description (mise à jour si le texte a évolué).
+        shows: dict[tuple[int, int], Event] = {}
+        for spec in SHOWS:
+            show = (
+                await db.execute(
+                    select(Event).where(Event.title == spec["title"])
+                )
+            ).scalars().first()
+            if show is None and spec.get("former"):
+                # Renommage : reprendre l'événement sous son ancien titre
+                # plutôt que d'en créer un doublon.
+                show = (
+                    await db.execute(
+                        select(Event).where(Event.title == spec["former"])
+                    )
+                ).scalars().first()
+                if show is not None:
+                    show.title = spec["title"]
+            if show is None:
+                show = Event(
+                    title=spec["title"],
+                    description=spec["description"],
+                    event_type=EventType.THEATER,
+                )
+                db.add(show)
+                await db.flush()
+            elif show.description != spec["description"]:
+                show.description = spec["description"]
+            shows[(spec["hour"], spec["minute"])] = show
+
+        if kraken is not None:
+            # La salle « Théâtre du Kraken » accueille désormais les
+            # productions ci-dessus : ses séances existantes sont rattachées
+            # à la pièce correspondant à leur horaire, puis la salle est
+            # retirée du catalogue (désactivation, non destructif).
+            old_sessions = (
+                await db.execute(
+                    select(Session).where(Session.event_id == kraken.id)
+                )
+            ).scalars().all()
+            for sess in old_sessions:
+                paris = sess.start_time.astimezone(MUSEUM_TZ)
+                target = shows.get((paris.hour, paris.minute))
+                if target is not None:
+                    sess.event_id = target.id
+            kraken.is_active = False
+            # L'événement salle ne doit pas être recréé par la suite.
+            kraken = None
+
+        # Séances des 7 prochains jours pour chaque production (idempotent :
+        # on ne crée que les créneaux absents — y compris ceux déjà
+        # réassignés depuis l'ancienne salle).
+        today = datetime.now(MUSEUM_TZ).date()
+        for (hour, minute), show in shows.items():
+            existing = set(
+                (
+                    await db.execute(
+                        select(Session.start_time).where(
+                            Session.event_id == show.id
+                        )
+                    )
+                ).scalars()
+            )
             db.add_all(
                 Session(
-                    event_id=kraken.id,
-                    start_time=session_at(
-                        today + timedelta(days=d), hour, minute
-                    ),
+                    event_id=show.id,
+                    start_time=start,
                     max_capacity=80,
                 )
                 for d in range(7)
-                for hour, minute in ((10, 30), (15, 0))
+                if (start := session_at(today + timedelta(days=d), hour, minute))
+                not in existing
             )
         await db.flush()
 
@@ -116,12 +205,14 @@ async def main() -> None:
                 ],
             ),
             Product(
-                # Séance additionnelle à tarif réduit : se combine à un
-                # pass/billet dans la même réservation — les droits sont
-                # fusionnés sur le même QR (1 billet par personne).
+                # Séance additionnelle à tarif réduit : add-on qui exige
+                # un billet/pass avec séance dans la même commande
+                # (règle serveur is_addon) — sinon musée + supp. à 17 €
+                # court-circuiterait le Pass 1 Spectacle à 20 €.
                 code="extra_show",
                 label="Séance supplémentaire (tarif réduit)",
                 kind=ProductKind.SIMPLE,
+                is_addon=True,
                 price_adult=Decimal("5.00"),
                 price_child=Decimal("3.50"),
                 price_reduced=Decimal("4.00"),
@@ -152,12 +243,14 @@ async def main() -> None:
                 ],
             ),
             Product(
+                # Grille cohérente : chaque tarif reste strictement sous
+                # la composition pass_1_show + extra_show (25/16,50/19 €).
                 code="pass_2_shows",
                 label="Pass 2 Spectacles (Musée + 2 séances)",
                 kind=ProductKind.PASS,
-                price_adult=Decimal("26.00"),
-                price_child=Decimal("18.00"),
-                price_reduced=Decimal("21.00"),
+                price_adult=Decimal("24.00"),
+                price_child=Decimal("16.00"),
+                price_reduced=Decimal("18.00"),
                 components=[
                     ProductComponent(
                         component_type=ComponentType.MUSEUM_DAY,
@@ -203,10 +296,33 @@ async def main() -> None:
                 ],
             ),
         ]
-        existing_codes = set(
-            (await db.execute(select(Product.code))).scalars()
-        )
-        new_products = [p for p in products if p.code not in existing_codes]
+        # Le seed est la source de vérité de la grille : les produits
+        # existants sont resynchronisés (label, prix, kind, is_addon) —
+        # les composants, eux, ne sont pas retouchés.
+        existing = {
+            p.code: p
+            for p in (
+                await db.execute(
+                    select(Product).where(
+                        Product.code.in_([p.code for p in products])
+                    )
+                )
+            ).scalars()
+        }
+        new_products = []
+        for spec in products:
+            row = existing.get(spec.code)
+            if row is None:
+                new_products.append(spec)
+                continue
+            row.label = spec.label
+            row.kind = spec.kind
+            row.is_addon = bool(spec.is_addon)
+            row.price_adult = spec.price_adult
+            row.price_child = spec.price_child
+            row.price_reduced = spec.price_reduced
+            row.family_base_price = spec.family_base_price
+            row.extra_child_price = spec.extra_child_price
         db.add_all(new_products)
 
         # Période haute saison de référence (vacances d'été 2026).

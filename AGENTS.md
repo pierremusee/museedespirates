@@ -27,6 +27,11 @@ ou du backlog :
 - Toute jauge : `SELECT ... FOR UPDATE` (sessions triées par id, anti-deadlock).
 - Opérations non destructives : désactivation (`is_active=false`) plutôt que
   suppression ; seeds idempotents.
+- **Phase développement : données jetables.** Les réservations, billets et
+  paiements créés en dev sont sans valeur — purge, reset ou suppression
+  libres et sans confirmation si ça simplifie le travail. La convention
+  non destructive vise le catalogue/référentiel (events, products,
+  sessions), pas les données d'usage.
 - Le cahier des charges en 13 points est **immuable** : les DFC et backlogs
   s'y ajoutent sans le modifier.
 - Backend : voir `frontend/AGENTS.md` pour les règles Next.js 16 (breaking

@@ -3,7 +3,7 @@ import uuid
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Boolean, Enum, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -48,6 +48,13 @@ class Product(Base):
     price_reduced: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     family_base_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     extra_child_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Produit « add-on » (ex. séance supplémentaire à tarif réduit) :
+    # ne peut être vendu qu'en complément de produits couvrant déjà les
+    # mêmes droits dans la même commande — sinon il court-circuiterait
+    # les pass (musée + séance supp. < Pass 1 Spectacle).
+    is_addon: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
     components: Mapped[list["ProductComponent"]] = relationship(

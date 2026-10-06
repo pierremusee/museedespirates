@@ -9,6 +9,7 @@ type ProductRead = {
   price_reduced: string | null;
   family_base_price: string | null;
   extra_child_price: string | null;
+  is_addon: boolean;
   components: { component_type: string; quantity: number }[];
 };
 
@@ -20,6 +21,7 @@ type SessionRead = {
 
 type EventRead = {
   id: string;
+  title: string;
   event_type: string;
   sessions: SessionRead[];
 };
@@ -41,11 +43,13 @@ export function extractTheaterSessions(events: EventRead[]) {
     .flatMap((e) =>
       e.sessions.map((s) => ({
         id: s.id,
+        startTime: s.start_time,
         label: timeFormatter.format(new Date(s.start_time)),
+        show: e.title,
         remaining: s.remaining_capacity,
       }))
     )
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
 }
 
 export default async function CaissePage() {

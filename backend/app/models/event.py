@@ -2,7 +2,7 @@ import enum
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum, String
+from sqlalchemy import Enum, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -25,6 +25,7 @@ class Event(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_type: Mapped[EventType] = mapped_column(
         Enum(EventType, name="event_type", values_callable=lambda e: [m.value for m in e]),
         nullable=False,

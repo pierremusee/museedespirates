@@ -25,6 +25,7 @@ type FreeProfile = "under_4" | "disability" | "pmr_companion";
 type SessionOption = {
   id: string;
   label: string;
+  show: string;
   remaining: number;
 };
 
@@ -432,6 +433,9 @@ export function ReservationDialog({
                         <CalendarClock className="size-3.5" />
                         {s.label}
                       </span>
+                      <span className="text-center text-xs font-medium leading-tight">
+                        {s.show}
+                      </span>
                       <span className="flex items-center gap-1 text-xs text-muted-foreground">
                         <Ticket className="size-3" />
                         {s.remaining} place{s.remaining > 1 ? "s" : ""}
@@ -477,7 +481,7 @@ export function ReservationDialog({
                           value={s.id}
                           disabled={s.remaining < persons}
                         >
-                          {s.label} ({s.remaining} place
+                          {s.label} — {s.show} ({s.remaining} place
                           {s.remaining > 1 ? "s" : ""})
                         </option>
                       ))}

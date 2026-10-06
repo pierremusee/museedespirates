@@ -7,6 +7,7 @@ import {
   CreditCard,
   FileText,
   Loader2,
+  Minus,
   Pencil,
   Plus,
   Printer,
@@ -33,7 +34,12 @@ import { TicketQR } from "@/app/(client)/succes/ticket-qr";
 // Types
 // ---------------------------------------------------------------------------
 
-type SessionOption = { id: string; label: string; remaining: number };
+type SessionOption = {
+  id: string;
+  label: string;
+  show: string;
+  remaining: number;
+};
 
 type Product = {
   code: string;
@@ -44,6 +50,7 @@ type Product = {
   price_reduced: string | null;
   family_base_price: string | null;
   extra_child_price: string | null;
+  is_addon: boolean;
   components: { component_type: string; quantity: number }[];
 };
 
@@ -57,10 +64,13 @@ type Tariff =
 
 type PaymentMethod = "cb" | "cash" | "ancv" | "check";
 
+// Une ligne = un produit × N personnes. Pour `simple`/`pass`, `counts`
+// porte le nombre de personnes par tarif (y compris profils gratuits) ;
+// `family` et `group` ont leur composition propre (2A+2E / groupSize).
 type CartLine = {
   id: number;
   product: Product;
-  tariff: Tariff;
+  counts: Record<Tariff, number>;
   groupSize: number;
   extraChildren: number;
   sessionIds: string[];
@@ -85,6 +95,7 @@ type AccessRead = {
   id: string;
   access_type: string;
   session_start: string | null;
+  session_event_title: string | null;
   valid_date: string | null;
   is_scanned: boolean;
 };
@@ -112,15 +123,6 @@ const FREE_TARIFFS = new Set<Tariff>([
   "pmr_companion",
 ]);
 
-const TARIFF_LABELS: Record<Tariff, string> = {
-  adult: "Adulte",
-  child: "Enfant",
-  reduced: "Réduit",
-  under_4: "-4 ans (gratuit)",
-  disability: "Invalidité (gratuit)",
-  pmr_companion: "PMR (gratuit)",
-};
-
 const PAYMENT_METHODS: {
   key: PaymentMethod;
   label: string;
@@ -136,6 +138,23 @@ const TICKET_TYPE_LABELS: Record<string, string> = {
   open_ticket: "Musée",
   session_standard: "Théâtre",
   session_dining: "Dîner-spectacle",
+};
+
+const PAID_TARIFFS: Tariff[] = ["adult", "child", "reduced"];
+const FREE_PROFILE_TARIFFS: Tariff[] = [
+  "under_4",
+  "disability",
+  "pmr_companion",
+];
+const ALL_TARIFFS: Tariff[] = [...PAID_TARIFFS, ...FREE_PROFILE_TARIFFS];
+
+const TARIFF_SHORT: Record<Tariff, string> = {
+  adult: "Adulte",
+  child: "Enfant",
+  reduced: "Réduit",
+  under_4: "-4 ans",
+  disability: "Invalidité",
+  pmr_companion: "PMR",
 };
 
 const eurFormatter = new Intl.NumberFormat("fr-FR", {
@@ -163,9 +182,36 @@ function hasMuseumDay(product: Product): boolean {
   return product.components.some((c) => c.component_type === "museum_day");
 }
 
+function zeroCounts(): Record<Tariff, number> {
+  return {
+    adult: 0,
+    child: 0,
+    reduced: 0,
+    under_4: 0,
+    disability: 0,
+    pmr_companion: 0,
+  };
+}
+
+// Composition d'une ligne en personnes par tarif — family/group ont une
+// composition fixe dérivée de leurs propres champs.
+function countsOf(line: CartLine): Record<Tariff, number> {
+  if (line.product.kind === "family") {
+    return { ...zeroCounts(), adult: 2, child: 2 + line.extraChildren };
+  }
+  if (line.product.kind === "group") {
+    return { ...zeroCounts(), adult: line.groupSize };
+  }
+  return line.counts;
+}
+
+function linePersons(line: CartLine): number {
+  const c = countsOf(line);
+  return ALL_TARIFFS.reduce((sum, t) => sum + c[t], 0);
+}
+
 function lineEstimate(line: CartLine, highSeason: boolean): number {
   const p = line.product;
-  if (line.tariff !== undefined && FREE_TARIFFS.has(line.tariff)) return 0;
   if (p.kind === "family") {
     return (
       Number(p.family_base_price) +
@@ -179,12 +225,13 @@ function lineEstimate(line: CartLine, highSeason: boolean): number {
       (Number(p.price_adult) + (highSeason ? MOD_ADULT_REDUCED : 0))
     );
   }
-  const priceKey = `price_${line.tariff}` as
-    | "price_adult"
-    | "price_child"
-    | "price_reduced";
-  const mod = line.tariff === "child" ? MOD_CHILD : MOD_ADULT_REDUCED;
-  return Number(p[priceKey]) + (highSeason ? mod : 0);
+  const c = line.counts;
+  return (
+    c.adult * (Number(p.price_adult) + (highSeason ? MOD_ADULT_REDUCED : 0)) +
+    c.reduced *
+      (Number(p.price_reduced) + (highSeason ? MOD_ADULT_REDUCED : 0)) +
+    c.child * (Number(p.price_child) + (highSeason ? MOD_CHILD : 0))
+  );
 }
 
 function autoSessions(
@@ -208,24 +255,7 @@ function autoSessionExcluding(
   );
 }
 
-const EXTRA_SHOW_CODE = "extra_show";
-
-function personsOf(line: CartLine): { tariff: Tariff; exclude: string[] }[] {
-  const exclude = line.sessionIds.filter(Boolean);
-  if (line.product.kind === "family") {
-    const members: Tariff[] = ["adult", "adult"];
-    for (let i = 0; i < 2 + line.extraChildren; i++)
-      members.push("child");
-    return members.map((tariff) => ({ tariff, exclude }));
-  }
-  if (line.product.kind === "group") {
-    return Array.from({ length: line.groupSize }, () => ({
-      tariff: "adult" as Tariff,
-      exclude,
-    }));
-  }
-  return [{ tariff: line.tariff, exclude }];
-}
+const PASS_1_CODE = "pass_1_show";
 
 // ---------------------------------------------------------------------------
 // Composant principal
@@ -265,12 +295,8 @@ export function PosTerminal({
     (sum, l) => sum + lineEstimate(l, highSeason),
     0
   );
-  const regularLines = lines.filter(
-    (l) => l.product.code !== EXTRA_SHOW_CODE
-  );
-  const extraLines = lines.filter(
-    (l) => l.product.code === EXTRA_SHOW_CODE
-  );
+  const regularLines = lines.filter((l) => !l.product.is_addon);
+  const extraLines = lines.filter((l) => l.product.is_addon);
   const extraTotal = extraLines.reduce(
     (sum, l) => sum + lineEstimate(l, highSeason),
     0
@@ -284,12 +310,47 @@ export function PosTerminal({
   // -------------------------------------------------------------------------
 
   function addLine(product: Product) {
+    if (product.kind === "simple" || product.kind === "pass") {
+      // Produit déjà au panier : +1 adulte sur la ligne existante.
+      const same = regularLines.find((l) => l.product.code === product.code);
+      if (same) {
+        updateLine(same.id, {
+          counts: { ...same.counts, adult: same.counts.adult + 1 },
+        });
+        return;
+      }
+      // Panier déjà rempli : la nouvelle ligne reprend la composition des
+      // personnes présentes (ex. 3 entrées musée puis clic « Théâtre » →
+      // 2 adultes + 1 enfant d'emblée).
+      const counts = zeroCounts();
+      if (regularLines.length > 0) {
+        for (const l of regularLines) {
+          const c = countsOf(l);
+          for (const t of ALL_TARIFFS) counts[t] += c[t];
+        }
+      } else {
+        counts.adult = 1;
+      }
+      setLines((prev) => [
+        ...prev,
+        {
+          id: nextId,
+          product,
+          counts,
+          groupSize: MIN_GROUP_SIZE,
+          extraChildren: 0,
+          sessionIds: autoSessions(product, sessions),
+        },
+      ]);
+      setNextId((n) => n + 1);
+      return;
+    }
     setLines((prev) => [
       ...prev,
       {
         id: nextId,
         product,
-        tariff: "adult",
+        counts: zeroCounts(),
         groupSize: MIN_GROUP_SIZE,
         extraChildren: 0,
         sessionIds: autoSessions(product, sessions),
@@ -299,27 +360,142 @@ export function PosTerminal({
   }
 
   function addExtraShow(product: Product) {
-    const persons = lines
-      .filter((l) => l.product.code !== EXTRA_SHOW_CODE)
-      .flatMap(personsOf);
-    if (persons.length === 0) {
-      addLine(product);
+    // Add-on (règle serveur is_addon) : une ligne par ligne du panier
+    // accordant déjà une séance — mêmes personnes, sur une séance
+    // différente de celle(s) déjà choisies.
+    const sessionLines = regularLines.filter(
+      (l) => sessionCountOf(l.product) > 0
+    );
+    if (sessionLines.length === 0) {
+      toast.error(
+        "La séance supplémentaire exige un billet ou un pass avec séance dans le panier."
+      );
       return;
     }
     setLines((prev) => [
       ...prev,
-      ...persons.map((p, i) => ({
+      ...sessionLines.map((src, i) => ({
         id: nextId + i,
         product,
-        tariff: p.tariff,
+        counts: { ...countsOf(src) },
         groupSize: MIN_GROUP_SIZE,
         extraChildren: 0,
-        sessionIds: [autoSessionExcluding(sessions, p.exclude)],
+        sessionIds: [
+          autoSessionExcluding(sessions, src.sessionIds.filter(Boolean)),
+        ],
       })),
     ]);
-    setNextId((n) => n + persons.length);
+    const n = sessionLines.reduce((sum, l) => sum + linePersons(l), 0);
+    setNextId((id) => id + sessionLines.length);
     toast.success(
-      `${persons.length} séance(s) supplémentaire(s) ajoutée(s) — retirez celles non souhaitées.`
+      `Séance supplémentaire ajoutée pour les ${n} personne(s) disposant d'une séance — ajustez les lignes non souhaitées.`
+    );
+  }
+
+  function bumpCount(id: number, tariff: Tariff, delta: number) {
+    setLines((prev) =>
+      prev.map((l) =>
+        l.id === id
+          ? {
+              ...l,
+              counts: {
+                ...l.counts,
+                [tariff]: Math.max(0, l.counts[tariff] + delta),
+              },
+            }
+          : l
+      )
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Suggestion « Pass 1 Spectacle » : musée + séance vendus à l'unité
+  // -------------------------------------------------------------------------
+
+  const isMuseumOnly = (l: CartLine) =>
+    l.product.kind === "simple" &&
+    hasMuseumDay(l.product) &&
+    sessionCountOf(l.product) === 0;
+  const isShowOnly = (l: CartLine) =>
+    l.product.kind === "simple" &&
+    !l.product.is_addon &&
+    !hasMuseumDay(l.product) &&
+    sessionCountOf(l.product) > 0;
+
+  function passSuggestion(): {
+    counts: Record<Tariff, number>;
+    persons: number;
+    savings: number;
+    sessionId: string;
+  } | null {
+    const pass = products.find((p) => p.code === PASS_1_CODE);
+    const museumLines = regularLines.filter(isMuseumOnly);
+    const showLines = regularLines.filter(isShowOnly);
+    if (!pass || museumLines.length === 0 || showLines.length === 0) {
+      return null;
+    }
+    const counts = zeroCounts();
+    for (const t of ALL_TARIFFS) {
+      counts[t] = Math.min(
+        museumLines.reduce((s, l) => s + l.counts[t], 0),
+        showLines.reduce((s, l) => s + l.counts[t], 0)
+      );
+    }
+    const persons = ALL_TARIFFS.reduce((s, t) => s + counts[t], 0);
+    if (persons === 0) return null;
+    const unit = (p: Product, t: Tariff) =>
+      t === "adult"
+        ? Number(p.price_adult)
+        : t === "child"
+          ? Number(p.price_child)
+          : t === "reduced"
+            ? Number(p.price_reduced)
+            : 0;
+    const museum = museumLines[0].product;
+    const show = showLines[0].product;
+    // Le modificateur haute saison s'annule des deux côtés : l'économie
+    // ne dépend que des prix unitaires du catalogue.
+    const savings = PAID_TARIFFS.reduce(
+      (s, t) => s + counts[t] * (unit(museum, t) + unit(show, t) - unit(pass, t)),
+      0
+    );
+    if (savings <= 0) return null;
+    const sessionId =
+      showLines.flatMap((l) => l.sessionIds).find(Boolean) ?? "";
+    return { counts, persons, savings, sessionId };
+  }
+
+  function convertToPass() {
+    const hint = passSuggestion();
+    const pass = products.find((p) => p.code === PASS_1_CODE);
+    if (!hint || !pass) return;
+    const toMove = { ...hint.counts };
+    const consume = (pred: (l: CartLine) => boolean) => (l: CartLine) => {
+      if (!pred(l)) return l;
+      const c = { ...l.counts };
+      for (const t of ALL_TARIFFS) {
+        const take = Math.min(c[t], toMove[t]);
+        c[t] -= take;
+        toMove[t] -= take;
+      }
+      return { ...l, counts: c };
+    };
+    const next = lines
+      .map(consume(isMuseumOnly))
+      .map(consume(isShowOnly))
+      .filter((l) => linePersons(l) > 0);
+    next.push({
+      id: nextId,
+      product: pass,
+      counts: { ...hint.counts },
+      groupSize: MIN_GROUP_SIZE,
+      extraChildren: 0,
+      sessionIds: [hint.sessionId],
+    });
+    setLines(next);
+    setNextId((n) => n + 1);
+    toast.success(
+      `Pass 1 Spectacle ×${hint.persons} — économie ${eurFormatter.format(hint.savings)}`
     );
   }
 
@@ -342,6 +518,7 @@ export function PosTerminal({
       ]);
       if (!evRes.ok || !seRes.ok) throw new Error();
       const events: {
+        title: string;
         event_type: string;
         sessions: {
           id: string;
@@ -358,11 +535,13 @@ export function PosTerminal({
         .flatMap((e) =>
           e.sessions.map((s) => ({
             id: s.id,
+            startTime: s.start_time,
             label: timeFmt.format(new Date(s.start_time)),
+            show: e.title,
             remaining: s.remaining_capacity,
           }))
         )
-        .sort((a, b) => a.label.localeCompare(b.label));
+        .sort((a, b) => a.startTime.localeCompare(b.startTime));
       setSessions(newSessions);
       setHighSeason((await seRes.json()).high_season);
       // Les séances choisies ne sont plus valables : ré-auto-sélection.
@@ -384,6 +563,18 @@ export function PosTerminal({
       if (picked.length !== need || new Set(picked).size !== need) {
         return `${need} séance(s) distincte(s) requise(s)`;
       }
+      const cap = Math.min(
+        ...picked.map(
+          (id) => sessions.find((s) => s.id === id)?.remaining ?? 0
+        )
+      );
+      if (linePersons(line) > cap) {
+        return `places insuffisantes (${cap} restantes)`;
+      }
+    }
+    const c = countsOf(line);
+    if (c.pmr_companion > c.disability) {
+      return "1 accompagnateur PMR par personne en invalidité";
     }
     if (
       line.product.kind === "group" &&
@@ -391,27 +582,61 @@ export function PosTerminal({
     ) {
       return `groupe : ${MIN_GROUP_SIZE} pers. minimum`;
     }
+    if (linePersons(line) === 0) {
+      return "aucune personne sur la ligne";
+    }
+    if (line.product.is_addon) {
+      // Règle serveur is_addon : les personnes en séance supplémentaire
+      // ne peuvent excéder celles couvertes par un billet/pass à séance.
+      const basePersons = regularLines
+        .filter((l) => sessionCountOf(l.product) > 0)
+        .reduce((s, l) => s + linePersons(l), 0);
+      const extraPersons = extraLines.reduce(
+        (s, l) => s + linePersons(l),
+        0
+      );
+      if (extraPersons > basePersons) {
+        return "exige un billet/pass avec séance pour chaque personne";
+      }
+    }
     return null;
   }
 
   function buildItems() {
-    return lines.map((l) => ({
-      product_code: l.product.code,
-      ...(l.product.kind === "family"
-        ? { extra_children: l.extraChildren }
-        : l.product.kind === "group"
-          ? { group_size: l.groupSize }
-          : FREE_TARIFFS.has(l.tariff)
-            ? {
-                free_profile: l.tariff,
-                ...(l.tariff === "disability" ? { category: "adult" } : {}),
-              }
-            : { category: l.tariff }),
-      ...(hasMuseumDay(l.product) ? { visit_date: visitDate } : {}),
-      ...(sessionCountOf(l.product) > 0
-        ? { session_ids: l.sessionIds.filter(Boolean) }
-        : {}),
-    }));
+    // Expansion : une ligne à compteurs produit 1 item par personne,
+    // mêmes conventions que la billetterie web (free_profile sans
+    // catégorie sauf disability qui exige category=adult).
+    return lines.flatMap((l) => {
+      const base = {
+        product_code: l.product.code,
+        ...(hasMuseumDay(l.product) ? { visit_date: visitDate } : {}),
+        ...(sessionCountOf(l.product) > 0
+          ? { session_ids: l.sessionIds.filter(Boolean) }
+          : {}),
+      };
+      if (l.product.kind === "family") {
+        return [{ ...base, extra_children: l.extraChildren }];
+      }
+      if (l.product.kind === "group") {
+        return [{ ...base, group_size: l.groupSize }];
+      }
+      const items: Record<string, unknown>[] = [];
+      for (const t of PAID_TARIFFS) {
+        for (let i = 0; i < l.counts[t]; i++) {
+          items.push({ ...base, category: t });
+        }
+      }
+      for (const t of FREE_PROFILE_TARIFFS) {
+        for (let i = 0; i < l.counts[t]; i++) {
+          items.push({
+            ...base,
+            free_profile: t,
+            ...(t === "disability" ? { category: "adult" } : {}),
+          });
+        }
+      }
+      return items;
+    });
   }
 
   async function submitOrder() {
@@ -572,6 +797,7 @@ export function PosTerminal({
   // -------------------------------------------------------------------------
 
   const locked = order !== null;
+  const passHint = locked ? null : passSuggestion();
 
   function renderLine(l: CartLine) {
     const err = lineErrors(l);
@@ -584,6 +810,9 @@ export function PosTerminal({
         <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium">
             {l.product.label}
+            <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+              ×{linePersons(l)} pers.
+            </span>
           </span>
           <div className="flex items-center gap-2">
             <span className="text-sm tabular-nums">
@@ -637,25 +866,50 @@ export function PosTerminal({
             />
           </div>
         )}
-        {l.product.kind !== "family" &&
-          l.product.kind !== "group" && (
-            <select
-              value={l.tariff}
-              disabled={locked}
-              onChange={(e) =>
-                updateLine(l.id, {
-                  tariff: e.target.value as Tariff,
-                })
-              }
-              className="h-8 w-full rounded-md border bg-background px-2 text-xs"
-            >
-              {(Object.keys(TARIFF_LABELS) as Tariff[]).map((t) => (
-                <option key={t} value={t}>
-                  {TARIFF_LABELS[t]}
-                </option>
-              ))}
-            </select>
-          )}
+        {(l.product.kind === "simple" || l.product.kind === "pass") && (
+          <div className="grid grid-cols-3 gap-1">
+            {ALL_TARIFFS.map((t) => (
+              <div
+                key={t}
+                className="flex items-center justify-between rounded-md border px-1.5 py-1"
+              >
+                <span
+                  className={cn(
+                    "text-[11px] leading-none",
+                    FREE_TARIFFS.has(t) && "text-muted-foreground"
+                  )}
+                >
+                  {TARIFF_SHORT[t]}
+                </span>
+                <span className="flex items-center gap-0.5">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-5"
+                    disabled={locked || l.counts[t] === 0}
+                    onClick={() => bumpCount(l.id, t, -1)}
+                  >
+                    <Minus className="size-3" />
+                  </Button>
+                  <span className="w-4 text-center text-xs tabular-nums">
+                    {l.counts[t]}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-5"
+                    disabled={locked}
+                    onClick={() => bumpCount(l.id, t, 1)}
+                  >
+                    <Plus className="size-3" />
+                  </Button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {need > 0 &&
           Array.from({ length: need }).map((_, i) => (
@@ -681,7 +935,7 @@ export function PosTerminal({
                       l.sessionIds[i] !== s.id)
                   }
                 >
-                  {s.label} ({s.remaining} pl.)
+                  {s.label} — {s.show} ({s.remaining} pl.)
                 </option>
               ))}
             </select>
@@ -753,7 +1007,7 @@ export function PosTerminal({
                 type="button"
                 disabled={locked}
                 onClick={() =>
-                  p.code === EXTRA_SHOW_CODE ? addExtraShow(p) : addLine(p)
+                  p.is_addon ? addExtraShow(p) : addLine(p)
                 }
                 className="flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition-colors hover:bg-muted disabled:opacity-50"
               >
@@ -784,6 +1038,27 @@ export function PosTerminal({
               </p>
             )}
             {regularLines.map(renderLine)}
+
+            {passHint && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-700 dark:bg-amber-950/40">
+                <p className="text-xs font-medium">
+                  Pass 1 Spectacle possible pour {passHint.persons}{" "}
+                  personne{passHint.persons > 1 ? "s" : ""} — économie{" "}
+                  {eurFormatter.format(passHint.savings)}
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Musée + séance vendus à l&apos;unité dans le panier.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-1.5 h-7 text-xs"
+                  onClick={convertToPass}
+                >
+                  Convertir en Pass 1 Spectacle
+                </Button>
+              </div>
+            )}
 
             {extraLines.length > 0 && (
               <div className="rounded-lg border">
@@ -1059,6 +1334,9 @@ export function PosTerminal({
                         className="block text-muted-foreground"
                       >
                         {TICKET_TYPE_LABELS[a.access_type] ?? a.access_type}
+                        {a.session_event_title
+                          ? ` — ${a.session_event_title}`
+                          : ""}
                         {a.session_start
                           ? ` — ${dateTimeFormatter.format(
                               new Date(a.session_start)

@@ -21,6 +21,7 @@ type SessionRead = {
 type EventRead = {
   id: string;
   title: string;
+  description: string | null;
   event_type: "permanent_exhibition" | "theater" | "guided_tour";
   is_active: boolean;
   sessions: SessionRead[];
@@ -42,6 +43,7 @@ type ProductRead = {
   price_reduced: string | null;
   family_base_price: string | null;
   extra_child_price: string | null;
+  is_addon: boolean;
   components: ProductComponentRead[];
 };
 
@@ -122,16 +124,24 @@ export default async function ReserverPage({
   const products: ProductRead[] = await productsRes.json();
   const season: { high_season: boolean } = await seasonRes.json();
 
-  const theaterSessions = events
-    .filter((e) => e.event_type === "theater")
+  // Programme du Théâtre du Kraken : chaque pièce est un événement
+  // `theater` distinct, avec sa description et ses séances du jour.
+  const theaterShows = events
+    .filter((e) => e.event_type === "theater" && e.sessions.length > 0)
+    .sort((a, b) =>
+      a.sessions[0].start_time.localeCompare(b.sessions[0].start_time)
+    );
+  const theaterSessions = theaterShows
     .flatMap((e) =>
       e.sessions.map((s) => ({
         id: s.id,
+        startTime: s.start_time,
         label: timeFormatter.format(new Date(s.start_time)),
+        show: e.title,
         remaining: s.remaining_capacity,
       }))
     )
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
 
   // Séance additionnelle à tarif réduit : proposée en option dans le
   // dialogue de réservation (fusionnée sur le même QR, même réservation).
@@ -157,14 +167,38 @@ export default async function ReserverPage({
         )}
       </div>
 
-      {theaterSessions.length > 0 && (
-        <p className="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
-          <CalendarClock className="size-4" />
-          Séances du jour :{" "}
-          {theaterSessions
-            .map((s) => `${s.label} (${s.remaining} places)`)
-            .join(" · ")}
-        </p>
+      {theaterShows.length > 0 && (
+        <div className="mb-8 space-y-3">
+          <p className="flex items-center gap-2 text-sm font-medium">
+            <CalendarClock className="size-4" />
+            Au Théâtre du Kraken aujourd&apos;hui :
+          </p>
+          <div className="grid gap-3 md:grid-cols-2">
+            {theaterShows.map((show) => (
+              <div
+                key={show.id}
+                className="rounded-lg border bg-card px-4 py-3"
+              >
+                <p className="text-sm font-semibold">{show.title}</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {show.sessions
+                    .map(
+                      (s) =>
+                        `${timeFormatter.format(
+                          new Date(s.start_time)
+                        )} (${s.remaining_capacity} places)`
+                    )
+                    .join(" · ")}
+                </p>
+                {show.description && (
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    {show.description}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       {products.length === 0 ? (
@@ -179,7 +213,9 @@ export default async function ReserverPage({
         </Card>
       ) : (
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {products.map((product) => {
+          {products
+            .filter((p) => !p.is_addon)
+            .map((product) => {
             const sessionCount = product.components
               .filter((c) => c.component_type !== "museum_day")
               .reduce((sum, c) => sum + c.quantity, 0);
@@ -237,8 +273,10 @@ export default async function ReserverPage({
                   ) : (
                     <ReservationDialog
                       product={product}
+                      // La séance supplémentaire (add-on) n'est proposée
+                      // que sur les produits accordant déjà une séance.
                       extraProduct={
-                        product.code !== "extra_show" ? extraShow : null
+                        sessionCount > 0 ? extraShow : null
                       }
                       sessions={theaterSessions}
                       visitDate={selectedDate}

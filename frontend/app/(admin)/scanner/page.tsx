@@ -121,11 +121,17 @@ export default function ScannerPage() {
   function accessLabel(a: {
     access_type: string;
     session_start: string | null;
+    session_event_title?: string | null;
     valid_date: string | null;
   }): string {
     const base = ACCESS_LABELS[a.access_type] ?? a.access_type;
     if (a.session_start) {
-      return `${base} — ${timeFormatter.format(new Date(a.session_start))}`;
+      const show = a.session_event_title
+        ? ` — ${a.session_event_title}`
+        : "";
+      return `${base}${show} — ${timeFormatter.format(
+        new Date(a.session_start)
+      )}`;
     }
     if (a.valid_date) {
       return `${base} — ${dayFormatter.format(new Date(`${a.valid_date}T12:00:00`))}`;

@@ -27,6 +27,7 @@ class ProductRead(BaseModel):
     price_reduced: Decimal | None
     family_base_price: Decimal | None
     extra_child_price: Decimal | None
+    is_addon: bool
     components: list[ProductComponentRead]
 
 

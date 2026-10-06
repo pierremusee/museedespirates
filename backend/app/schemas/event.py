@@ -21,6 +21,7 @@ class EventRead(BaseModel):
 
     id: uuid.UUID
     title: str
+    description: str | None
     event_type: EventType
     is_active: bool
     sessions: list[SessionRead]

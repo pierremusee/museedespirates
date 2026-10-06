@@ -20,6 +20,7 @@ class TicketAccessRead(BaseModel):
     is_scanned: bool
     scanned_at: datetime | None
     session_start: datetime | None = None
+    session_event_title: str | None = None
 
 
 class TicketScanRequest(BaseModel):

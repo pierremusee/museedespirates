@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.db.session import get_db
 from app.models.reservation import Reservation
 from app.models.reservation_item import ReservationItem
+from app.models.session import Session
 from app.models.ticket import Ticket
 from app.models.ticket_access import TicketAccess
 from app.schemas.reservation import (
@@ -26,11 +27,13 @@ def _reservation_options():
         selectinload(Reservation.items)
         .selectinload(ReservationItem.tickets)
         .selectinload(Ticket.accesses)
-        .selectinload(TicketAccess.session),
+        .selectinload(TicketAccess.session)
+        .selectinload(Session.event),
         selectinload(Reservation.items).selectinload(ReservationItem.product),
         selectinload(Reservation.tickets)
         .selectinload(Ticket.accesses)
-        .selectinload(TicketAccess.session),
+        .selectinload(TicketAccess.session)
+        .selectinload(Session.event),
         selectinload(Reservation.payments),
     )
 

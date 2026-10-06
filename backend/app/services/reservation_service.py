@@ -346,6 +346,32 @@ async def create_reservation(
             }
         )
 
+    # Produits « add-on » (is_addon) : droits complémentaires à tarif
+    # réduit — chaque personne add-on doit être couverte par un produit
+    # de base accordant le même droit dans la même commande. Sinon
+    # « musée + séance supp. » (17 €) court-circuiterait le Pass 1
+    # Spectacle (20 €) et `extra_show` seul le billet théâtre plein
+    # tarif.
+    addon_needs: Counter = Counter()
+    base_cover: Counter = Counter()
+    for plan in plans:
+        granted = {
+            c.component_type for c in plan["product"].components
+        }
+        target = addon_needs if plan["product"].is_addon else base_cover
+        for component_type in granted:
+            target[component_type] += len(plan["persons"])
+    if any(
+        needed > base_cover.get(component_type, 0)
+        for component_type, needed in addon_needs.items()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La séance supplémentaire est un complément : elle "
+            "exige un billet ou un pass avec séance pour chaque "
+            "personne dans la même commande",
+        )
+
     # Accompagnateur PMR : max 1 par porteur de carte d'invalidité (DFC n°6).
     profiles = [
         plan["item_in"].free_profile for plan in plans
@@ -539,11 +565,13 @@ async def create_reservation(
             selectinload(Reservation.items)
             .selectinload(ReservationItem.tickets)
             .selectinload(Ticket.accesses)
-            .selectinload(TicketAccess.session),
+            .selectinload(TicketAccess.session)
+            .selectinload(Session.event),
             selectinload(Reservation.items).selectinload(ReservationItem.product),
             selectinload(Reservation.tickets)
             .selectinload(Ticket.accesses)
-            .selectinload(TicketAccess.session),
+            .selectinload(TicketAccess.session)
+            .selectinload(Session.event),
             selectinload(Reservation.payments),
         )
         .where(Reservation.id == reservation.id)
@@ -579,10 +607,12 @@ async def add_payment(
             selectinload(Reservation.items)
             .selectinload(ReservationItem.tickets)
             .selectinload(Ticket.accesses)
-            .selectinload(TicketAccess.session),
+            .selectinload(TicketAccess.session)
+            .selectinload(Session.event),
             selectinload(Reservation.tickets)
             .selectinload(Ticket.accesses)
-            .selectinload(TicketAccess.session),
+            .selectinload(TicketAccess.session)
+            .selectinload(Session.event),
             selectinload(Reservation.payments),
         )
         .where(Reservation.id == reservation_id)
@@ -738,11 +768,13 @@ async def cancel_reservation(
             selectinload(Reservation.items)
             .selectinload(ReservationItem.tickets)
             .selectinload(Ticket.accesses)
-            .selectinload(TicketAccess.session),
+            .selectinload(TicketAccess.session)
+            .selectinload(Session.event),
             selectinload(Reservation.items).selectinload(ReservationItem.product),
             selectinload(Reservation.tickets)
             .selectinload(Ticket.accesses)
-            .selectinload(TicketAccess.session),
+            .selectinload(TicketAccess.session)
+            .selectinload(Session.event),
             selectinload(Reservation.payments),
         )
         .where(Reservation.id == reservation.id)

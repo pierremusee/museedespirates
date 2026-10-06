@@ -84,6 +84,15 @@ async def seed() -> dict:
             if musee_id
             else None
         )
+        # Déterministe : les produits doivent viser le vrai musée (les
+        # doublons « (test) » ont été désactivés — un composant pointant
+        # vers l'un d'eux rend toute réservation musée impossible).
+        if musee is None or not musee.is_active:
+            musee = (
+                await db.execute(
+                    select(Event).where(Event.title == "Musée des Pirates")
+                )
+            ).scalars().first()
         kraken = (
             await db.execute(
                 select(Event).where(Event.title == "Théâtre (test)").limit(1)
@@ -93,8 +102,19 @@ async def seed() -> dict:
             musee = Event(title="Musée (test)", event_type=EventType.PERMANENT_EXHIBITION)
         if kraken is None:
             kraken = Event(title="Théâtre (test)", event_type=EventType.THEATER)
+        # Réactivation non destructive : un événement désactivé lors d'un
+        # ménage du catalogue ne peut plus recevoir de réservations.
+        musee.is_active = True
+        kraken.is_active = True
         db.add_all([musee, kraken])
         await db.flush()
+        # Tous les composants musée visent l'événement résolu (d'anciens
+        # produits peuvent encore pointer vers un doublon désactivé).
+        await db.execute(
+            update(ProductComponent)
+            .where(ProductComponent.component_type == ComponentType.MUSEUM_DAY)
+            .values(event_id=musee.id)
+        )
 
         s1 = Session(event_id=kraken.id, start_time=session_at(LOW_DAY, 10, 30), max_capacity=80)
         s2 = Session(event_id=kraken.id, start_time=session_at(LOW_DAY, 15, 0), max_capacity=80)
@@ -130,14 +150,18 @@ async def seed() -> dict:
         wanted = {
             "museum_entry": simple("museum_entry", "Entrée Musée", "12", "8", "9", [museum_comp()]),
             "theater_show": simple("theater_show", "Billet Théâtre", "10", "7", "8", [theater_comp()]),
-            "extra_show": simple("extra_show", "Séance supplémentaire (test)", "5", "3.50", "4", [theater_comp()]),
+            "extra_show": Product(code="extra_show", label="Séance supplémentaire (test)", kind=ProductKind.SIMPLE,
+                    is_addon=True,
+                    price_adult=Decimal("5"), price_child=Decimal("3.50"),
+                    price_reduced=Decimal("4"),
+                    components=[theater_comp()]),
             "pass_1_show": Product(code="pass_1_show", label="Pass 1 Spectacle", kind=ProductKind.PASS,
                     price_adult=Decimal("20"), price_child=Decimal("13"),
                     price_reduced=Decimal("15"),
                     components=[museum_comp(), theater_comp()]),
             "pass_2_shows": Product(code="pass_2_shows", label="Pass 2 Spectacles", kind=ProductKind.PASS,
-                    price_adult=Decimal("26"), price_child=Decimal("18"),
-                    price_reduced=Decimal("21"),
+                    price_adult=Decimal("24"), price_child=Decimal("16"),
+                    price_reduced=Decimal("18"),
                     components=[museum_comp(), theater_comp(2)]),
             "family_museum": Product(code="family_museum", label="Famille Musée", kind=ProductKind.FAMILY,
                     family_base_price=Decimal("35"), extra_child_price=Decimal("6"),
@@ -219,15 +243,15 @@ async def main() -> None:
     if status1 == 201:
         # DFC n°7 : aucune émission avant paiement complet.
         assert resa["status"] == "pending" and resa["tickets"] == []
-        assert Decimal(resa["total_price"]) == Decimal("90.00")
+        assert Decimal(resa["total_price"]) == Decimal("87.00")
         print(f"=> pending, total={resa['total_price']}, amount_due={resa['amount_due']}")
 
         print("   Règle canal web : ANCV refusé en ligne")
-        pay(resa["id"], "ancv", "90.00")
+        pay(resa["id"], "ancv", "87.00")
         print("   Règle canal web : paiement CB partiel refusé")
         pay(resa["id"], "cb", "50.00")
 
-        s_pay, paid = pay(resa["id"], "cb", "90.00")
+        s_pay, paid = pay(resa["id"], "cb", "87.00")
         if s_pay == 201:
             assert paid["reservation_status"] == "confirmed"
             assert Decimal(paid["amount_due"]) == Decimal("0")
@@ -238,7 +262,7 @@ async def main() -> None:
             print(f"=> {len(tickets)} billets émis ({n_open} open, {n_sess} session)")
             # 1 billet par personne, accès fusionnés : 8 personnes, 11 accès.
             assert len(tickets) == 8 and n_open == 8 and n_sess == 3
-            print("=> OK : billets multi-accès + total 90.00 conformes DFC n°5")
+            print("=> OK : billets multi-accès + total 87.00 conformes DFC n°5")
 
             print("   Paiement sur commande soldée (doit être refusé) :")
             pay(resa["id"], "cb", "1.00")
@@ -465,6 +489,29 @@ async def main() -> None:
             print(f"   => 1 billet, {len(accesses)} accès : {kinds}")
             assert len(accesses) == 3 and kinds.count("session_standard") == 2
             print("=> OK : séance supplémentaire fusionnée sur le même QR")
+
+    print("\nTest 9b — séance supplémentaire sans droit de base (rejetée) :")
+    s12, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "barbe.noire@queenanne.fr",
+        "channel": "pos",
+        "items": [
+            {"product_code": "museum_entry", "category": "adult",
+             "visit_date": today},
+            {"product_code": "extra_show", "category": "adult",
+             "session_id": ids["today2"]},
+        ],
+    })
+    assert s12 == 400, "musée + extra_show doit être rejeté (add-on)"
+    s13, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "barbe.noire@queenanne.fr",
+        "channel": "pos",
+        "items": [
+            {"product_code": "extra_show", "category": "adult",
+             "session_id": ids["today2"]},
+        ],
+    })
+    assert s13 == 400, "extra_show seul doit être rejeté (add-on)"
+    print("=> OK : add-on sans billet/pass à séance refusé (grille cohérente)")
 
     print("\nTest 8 — purge des paniers abandonnés (pending > 15 min) :")
     status10, resa10 = post(f"{BASE_URL}/reservations", {

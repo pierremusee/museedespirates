@@ -112,7 +112,7 @@ musee/
 
 | Table | Modèle | Rôle |
 |---|---|---|
-| `events` | `Event` | Entité du Complexe (musée, théâtre…). `event_type` : `permanent_exhibition` / `theater` / `guided_tour`. `is_active` = retrait non destructif du catalogue. |
+| `events` | `Event` | Entité du Complexe (musée, pièce de théâtre…). `event_type` : `permanent_exhibition` / `theater` / `guided_tour`. `description` = texte éditorial optionnel (affiche des pièces). `is_active` = retrait non destructif du catalogue. |
 | `sessions` | `Session` | Séance d'un événement. `max_capacity`, `booked_seats` (compteur anti-surbooking, contrainte `booked_seats <= max_capacity`). `remaining_capacity` exposé en API. |
 | `products` | `Product` | Produit vendable. `kind` : `simple` / `pass` / `family` / `group`. Prix de base **basse saison** (`price_adult`, `price_child`, `price_reduced`, `family_base_price`, `extra_child_price`). |
 | `product_components` | `ProductComponent` | Contenu d'un produit **par personne**. `component_type` : `museum_day` / `theater_session` / `dining_session` (+ `quantity`, `event_id` pour les accès musée). |
@@ -154,7 +154,8 @@ ReservationItem 1──n Ticket (item ancre)
 Event (supersédé par products) → `d38f51a62b90` catalogue produits →
 `e5a91c7f3d28` gratuité → `c7d31e08a4f6` groupes → `f2c4a8e91b07` paiements →
 `e8a2f50b1c39` réservation expirée → `a1c9e4f7b2d3` billet multi-accès →
-`b7e2a1f09c34` refonte billets.
+`b7e2a1f09c34` refonte billets → `d4b8c2e61a07` `events.description`
+(affiche des productions).
 
 ---
 
@@ -192,6 +193,14 @@ pending ──(solde = 0 via payments, ou total = 0 €)──> confirmed  → b
   date de référence (`visit_date` ou jour de la 1ʳᵉ séance) tombe dans une
   `SeasonalPeriod`.
 - `computed_price` et `season_modifier` figés par item (traçabilité).
+- **Produits add-on** (`is_addon`, ex. `extra_show`) : chaque personne
+  add-on doit être couverte par un produit non-add-on accordant le même
+  droit dans la même commande, sinon **400**. Sans cette règle,
+  « musée + séance supp. » (17 €) court-circuiterait le Pass (20 €) et
+  `extra_show` seul le billet théâtre plein tarif.
+- **Cohérence de grille** : `pass_2_shows` reste strictement sous
+  `pass_1_show + extra_show` par catégorie (24/16/18 < 25/16,50/19 €) —
+  le pass groupé est toujours la meilleure offre.
 
 ### Gratuités (DFC n°6)
 
@@ -285,7 +294,7 @@ serveur (`cache: "no-store"`) sur `NEXT_PUBLIC_API_URL`.
 | | `reservation-dialog.tsx` | Client : compteurs par tarif + profils gratuits, choix de séance(s), séance supplémentaire `extra_show` fusionnée, estimation live (re-calculée serveur), POST reservation + paiement CB simulé, redirect `/succes`. |
 | `/succes` | `(client)/succes/page.tsx` | Confirmation : lignes, total, référence, **1 QR par billet** (`ticket-qr.tsx` → qrcode.react) + liste des accès. |
 | `/scanner` | `(admin)/scanner/page.tsx` | Client : sélecteur de poste (entrée musée / séances du jour), `@yudiel/react-qr-scanner`, verdict vert/rouge, warning justificatif, droits restants. |
-| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` (~1080 lignes) | Terminal POS guichet : panier multi-lignes, tarifs/profils, séance supplémentaire (`addExtraShow`/`personsOf`/`renderLine`), multi-paiements avec rendu, annulation « Modifier la commande », impression QR. |
+| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` (~1150 lignes) | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), miroir de la composition du panier à l'ajout d'un produit, suggestion « Pass 1 Spectacle » quand musée + séance sont vendus à l'unité (`passSuggestion`/`convertToPass`), séance supplémentaire par ligne (`addExtraShow`), multi-paiements avec rendu, annulation « Modifier la commande », impression QR. |
 
 Conventions front : Server Components par défaut, `"use client"` minimal ;
 formatage `Intl` en `fr-FR` / `Europe/Paris` ; types API recopiés localement.
@@ -317,11 +326,17 @@ surbooking, multi-paiements POS (cash+ANCV, chèque réservé groupes),
 seuil groupe ≥ 8, `extra_show` fusionné, purge des paniers expirés.
 
 **Catalogue seedé** (basse saison) : `museum_entry` 12/8/9 €,
-`theater_show` 10/7/8 €, `extra_show` 5/3,50/4 €, `pass_1_show` 20/13/15 €,
-`pass_2_shows` 26/18/21 €, `family_museum` 35 € (+6 €/enfant sup.),
-`family_pass_1_show` 58 € (+10 €/enfant sup.). Haute saison seedée :
-2026-07-01 → 2026-08-31. Théâtre : séances 10h30 et 15h00, jauge 80,
-7 jours glissants.
+`theater_show` 10/7/8 €, `extra_show` 5/3,50/4 € (**add-on** : séance
+supplémentaire, exige un billet/pass à séance dans la commande),
+`pass_1_show` 20/13/15 €, `pass_2_shows` 24/16/18 €, `family_museum`
+35 € (+6 €/enfant sup.), `family_pass_1_show` 58 € (+10 €/enfant sup.). Haute saison seedée :
+2026-07-01 → 2026-08-31. Théâtre du Kraken : **deux productions** en
+carte — « **À l'Abordage !** » à **10h30** et « **Les Conjurés** » à
+**15h00**, jauge 80, 7 jours glissants. Chaque pièce est un événement
+`theater` distinct avec sa `description` (le seed renomme via la clé
+`former` au lieu de créer des doublons). L'événement salle historique
+« Théâtre du Kraken » est désactivé (`is_active=false`) ; ses séances
+existantes ont été rattachées à la pièce correspondant à leur horaire.
 
 **Test physique** validé : scanner sur Android via `adb reverse tcp:3000` +
 `tcp:8000`.
@@ -365,6 +380,29 @@ seuil groupe ≥ 8, `extra_show` fusionné, purge des paniers expirés.
 - ✅ Règle groupes ≥ 8 ; gratuités DFC n°6 ; haute saison DFC n°5.
 - ✅ Correctifs post-revue externe : FOR UPDATE sur accès, `len(session_ids)`
   strict, filtre `is_scanned`, 409 différé, 400 `museum_day`.
+- ✅ **Programmation théâtre** (2026-10-06) : 2 productions distinctes au
+  Théâtre du Kraken — « À l'Abordage ! » (10h30) et « Les Conjurés »
+  (15h00) — `events.description`, titre de la pièce affiché en
+  billetterie (`/reserver`), modale, caisse, postes du scanner, verdict
+  de scan (`access_label`) et accès des billets (`session_event_title`).
+- ✅ `test_booking.py` résilient au ménage du catalogue : réactive son
+  événement « Théâtre (test) » et re-pointe tous les composants musée
+  vers « Musée des Pirates » (suite E2E à nouveau verte).
+- ✅ **Fluidification caisse** (2026-10-06) : panier à compteurs par tarif
+  (une ligne peut porter 2A + 1E), clic produit = +1 adulte si déjà
+  présent, sinon reprise de la composition du panier ; contrôles capacité
+  séance et PMR par ligne ; bannière « Convertir en Pass 1 Spectacle »
+  avec économie calculée quand musée + séance coexistent à l'unité.
+- ✅ **Grille tarifaire cohérente** (2026-10-06) : `Product.is_addon`
+  (migration `e6b3f1a84c2d`) + règle serveur de couverture des droits —
+  `extra_show` ne peut plus être vendu sans billet/pass à séance dans la
+  même commande (combos dominants musée+supp., famille+supp., add-on
+  seul rejetés). `pass_2_shows` repricé 26/18/21 → **24/16/18 €** pour
+  rester sous pass_1+extra. Le seed resynchronise désormais label, prix,
+  kind et `is_addon` des produits existants (source de vérité de la
+  grille). Front : add-ons masqués dans la grille `/reserver` (proposés
+  uniquement en option des produits à séance), `addExtraShow` du POS ne
+  miroite que les lignes à séance.
 
 ### Backlog (feuille de route non figée)
 
@@ -390,6 +428,9 @@ live (spectacle imminent + places restantes, QR sur affiches physiques).
 
 - Doublons d'événements de test en base (`Musée (test)`, `Théâtre (test)` ×5) —
   désactivés (`is_active=false`), **non supprimés** (choix non destructif).
+  `test_booking.py` en réactive un à chaque run (ses séances doivent être
+  réservables) — le repasser inactif après coup si le catalogue doit
+  rester propre.
 - Le scan ne vérifie pas `reservation.status` — à durcir si annulation/
   remboursement post-confirmation est ajouté.
 - `booked_seats` = personnes ≠ `COUNT(tickets)` après fusion gloutonne.
@@ -415,7 +456,8 @@ live (spectacle imminent + places restantes, QR sur affiches physiques).
 ### Patrons imposés
 
 - Opérations **non destructives / réversibles** (désactivation > suppression,
-  seeds idempotents).
+  seeds idempotents) — valable pour le catalogue/référentiel ; en dev, les
+  réservations/billets/paiements sont **jetables** (purge/reset libres).
 - Prix toujours calculés **côté serveur**.
 - Toute jauge passe par `SELECT ... FOR UPDATE` (trié par id).
 - Validation sur **matériel réel** privilégiée (scanner Android USB).
