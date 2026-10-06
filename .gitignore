@@ -18,6 +18,9 @@ node_modules/
 out/
 *.tsbuildinfo
 
+# Document directeur (original humain — OBJECTIFS.md fait foi dans le dépôt)
+Musee_des_Pirates_Objectifs_Professionnalisation.docx
+
 # Divers
 .DS_Store
 Thumbs.db

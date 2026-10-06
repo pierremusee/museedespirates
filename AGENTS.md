@@ -1,10 +1,14 @@
 # AGENTS.md — Musée des Pirates
 
-## Référence projet
+## Références projet
 
-`DOCUMENTATION.md` à la racine est la **documentation vivante du projet**
-(architecture, modèle de données, règles métier, endpoints, backlog, dette).
-La lire avant toute intervention.
+- `OBJECTIFS.md` — la cible de professionnalisation (source de vérité ;
+  transcrite du document Word directeur, quasi immuable).
+- `PILOTAGE.md` — position actuelle, milestone courant, critères de sortie
+  et preuves. Court par construction.
+- `DOCUMENTATION.md` — la **documentation vivante du projet** (architecture,
+  modèle de données, règles métier, endpoints, backlog, dette).
+  La lire avant toute intervention.
 
 ## Règle de documentation continue (obligatoire)
 
@@ -13,9 +17,21 @@ ou du backlog :
 
 1. Mettre à jour les sections concernées de `DOCUMENTATION.md` et la date
    d'en-tête (« Dernière mise à jour »).
-2. Enregistrer la conclusion dans la mémoire Honcho (via `ask-hermes`, peer
-   `user-default-dev`) en préfixant par
-   `[Musée des Pirates — état projet AAAA-MM-JJ]`.
+2. Si un milestone avance ou se clôt, ou si la position de maturité change :
+   mettre à jour `PILOTAGE.md` et clôturer l'issue GitHub associée via la PR
+   (1 issue par milestone, jamais par tâche).
+3. Facultatif : enregistrer une courte conclusion dans la mémoire Honcho
+   (via `ask-hermes`, peer `user-default-dev`) en préfixant par
+   `[Musée des Pirates — état projet AAAA-MM-JJ]`. Honcho n'est jamais une
+   source de vérité : le dépôt doit rester autosuffisant si Honcho est
+   indisponible.
+
+## Anti-illusion
+
+Un objectif n'est jamais atteint parce qu'il est documenté. Les statuts de
+`PILOTAGE.md` (prévu / implémenté / exercé / testé / démontré /
+reproductible) doivent refléter des preuves identifiables (test, commande,
+PR), pas des intentions.
 
 ## Conventions du projet
 
