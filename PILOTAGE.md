@@ -1,0 +1,78 @@
+# PILOTAGE — Musée des Pirates
+
+> Document volontairement court et stable. Mis à jour **uniquement** quand un
+> milestone avance, se clôt ou que la position de maturité change — jamais à
+> chaque session de code.
+>
+> - Cible complète : `OBJECTIFS.md` (niveaux de maturité §20, scénarios §17)
+> - État technique réel : `DOCUMENTATION.md`
+> - Exécution : issues GitHub (1 par milestone), PR, CI
+
+## Vocabulaire de preuve (anti-illusion)
+
+Toute affirmation de maturité utilise l'un de ces statuts, dans l'ordre
+croissant d'exigence :
+
+| Statut | Signification |
+|---|---|
+| `prévu` | Intention documentée, rien d'implémenté |
+| `implémenté` | Le code existe |
+| `exercé` | Le chemin est appelé par un test, sans assertion dessus |
+| `testé` | Un test avec assertion couvre le comportement |
+| `démontré` | Prouvé dans les conditions visées (concurrence réelle, charge…) |
+| `reproductible` | Une commande suffit à rejouer la preuve |
+
+Règle : écrire une documentation n'est pas une preuve ; une CI verte ne prouve
+que les tests présents ; une simulation n'est pas une expérience réelle.
+
+## Position actuelle — évaluation du 2026-10-06
+
+| Niveau (OBJECTIFS.md §20) | Statut |
+|---|---|
+| 1 — Fonctionnel | **Atteint** : parcours web complets, E2E verte, scan validé physiquement |
+| 2 — Robuste | **Entamé** : règles métier testées ; concurrence **démontrée** (M1, 2026-10-06) ; paiements sans machine à états |
+| 3 — Professionnel | Non atteint : sécurité absente, pas de CI, observabilité quasi nulle |
+| 4 — Production simulée | Non atteint |
+| 5 — Référence portfolio | Non atteint : pas de README racine, un tiers ne peut pas installer seul |
+
+## Milestone courant
+
+**M1 — démontrer la concurrence : terminé, en attente de validation.**
+
+Preuve : `backend/scripts/test_concurrency.py` — 30 requêtes concurrentes
+sur jauge 5 → exactement 5 × 201, `booked_seats == 5`, zéro dépassement ;
+8 scans concurrents du même accès → 1 seul × 200. Commande :
+`./venv/Scripts/python.exe scripts/test_concurrency.py` (depuis `backend/`).
+L'assertion manquante du test 5 (`test_booking.py`) a été ajoutée.
+Statut du mécanisme anti-surbooking : **démontré + reproductible**.
+Prochain milestone : M2 (CI minimale) — ne démarre qu'après validation.
+
+<details><summary>Critères de M1 (tous remplis)</summary>
+
+- [x] N concurrent sur capacité K → K succès, zéro dépassement
+- [x] Scans simultanés du même accès → 1 seul accepté
+- [x] Assertion ajoutée au test séquentiel existant
+- [x] Reproductible en une commande (3 runs consécutifs verts)
+
+</details>
+
+## Prochains milestones (ordre indicatif)
+
+| # | Milestone | Écart traité |
+|---|---|---|
+| M2 | CI minimale (GitHub Actions : Postgres + suite de tests + lint front/back) | Reproductibilité des preuves — §11, §15 |
+| M3 | README racine + fiabilisation de l'install pour un tiers | Niveau 5, §18 |
+| M4 | Paiements : machine à états + idempotence + échec/timeout simulables | §6, §17 « Double paiement » |
+| M5 | Sécurité minimale : auth par rôle sur endpoints admin/scanner, CORS restreint | §10, Niveau 3 |
+
+Le backlog détaillé des chantiers (A–D) et la boîte à idées restent dans
+`DOCUMENTATION.md` §11 — ils ne sont pas dupliqués ici.
+
+## Écarts et risques principaux
+
+1. ~~Anti-surbooking non prouvé~~ → démontré par M1 (2026-10-06).
+2. Aucune reproductibilité automatisée (pas de CI ; les suites exigent une
+   stack lancée à la main et écrivent directement en base).
+3. Pas de README racine → un tiers ne peut pas installer le projet.
+4. Sécurité absente (aucune auth, CORS ouvert) — assumé « dev only », mais
+   bloque le Niveau 3.

@@ -2,8 +2,9 @@
 
 > **Dernière mise à jour : 2026-10-06**
 > Ce document est la référence vivante du projet. Il doit être mis à jour à
-> chaque évolution (voir §13 — Maintenance). La mémoire Honcho (peer
-> `user-default-dev`) est le complément persistant de ce document.
+> chaque évolution (voir §13 — Maintenance). Cible : `OBJECTIFS.md` ;
+> pilotage : `PILOTAGE.md`. La mémoire Honcho (peer `user-default-dev`) est
+> une couche de contexte **facultative** — jamais source de vérité.
 
 ---
 
@@ -27,8 +28,7 @@ multi-paiements, contrôle d'accès, ventes multicanal), pas du site lui-même.
 concurrence et du **surbooking** en temps réel — deux clients ne doivent jamais
 acheter la même place.
 
-**Rôles** : `user-default-dev` = Devin (agent de codage) ; Pierre = validateur
-humain final.
+**Validation finale** : Pierre (humain).
 
 **Répertoire** : `C:\Users\pierr\dev\musee`
 
@@ -55,7 +55,8 @@ Next.js :3000 ──HTTP──> FastAPI :8000 ──asyncpg──> PostgreSQL :5
 
 **CORS** : ouvert (`*`) — environnement de dev uniquement.
 
-**Dépôt GitHub** : `github.com/pierremusee/museedespirates` (branche `main`,
+**Dépôt GitHub** : `github.com/pierremusee/museedespirates` (**public**,
+branche `main`,
 compte dédié `pierremusee` — séparé du compte perso `pierrusthemaboul`).
 Auth : PAT fine-grained stocké dans Git Credential Manager pour
 `pierremusee@github.com` (remote `https://pierremusee@github.com/...` →
@@ -77,7 +78,7 @@ musee/
 ├── gemini-code-1791050970318.md      # mission fondatrice frontend
 ├── backend/
 │   ├── requirements.txt
-│   ├── alembic.ini, alembic/         # migrations (9 versions)
+│   ├── alembic.ini, alembic/         # migrations (12 versions)
 │   ├── venv/
 │   ├── app/
 │   │   ├── main.py                   # FastAPI + lifespan (purge loop 60 s)
@@ -168,6 +169,9 @@ Event (supersédé par products) → `d38f51a62b90` catalogue produits →
   **triées par id** (anti-deadlock).
 - Contrainte SQL `booked_seats <= max_capacity` en filet de sécurité.
 - Une commande `pending` tient la jauge ; la purge la libère.
+- **Démontré sous concurrence** (2026-10-06, `test_concurrency.py`) :
+  30 requêtes simultanées sur jauge 5 → 5 acceptées, 25 rejets 400,
+  `booked_seats = 5`, zéro dépassement.
 
 ### Cycle de vie d'une réservation
 
@@ -254,6 +258,8 @@ validation `model_validator`).
   présenté à plusieurs postes (conséquence voulue du modèle polymorphique).
 - Verrou `SELECT ... FOR UPDATE` sur les accès → deux douchettes simultanées
   se sérialisent, la seconde voit l'accès consommé (anti double-scan).
+  **Démontré** (`test_concurrency.py`) : 8 scans concurrents du même accès
+  → 1 seul accepté, 7 rejets 400.
 - `control_warning` remonté pour les profils gratuits (via l'item ancre).
 - Réponse = accès validé (`access_label`) + liste complète des accès du billet.
 
@@ -311,6 +317,7 @@ docker compose up -d                          # PostgreSQL :5432
 ./venv/Scripts/python.exe scripts/seed_db.py      # seed idempotent
 uvicorn app.main:app --reload                     # API :8000
 ./venv/Scripts/python.exe scripts/test_booking.py # suite E2E
+./venv/Scripts/python.exe scripts/test_concurrency.py  # preuve concurrence (M1)
 alembic revision --autogenerate -m "..."          # nouvelle migration
 alembic upgrade head
 
@@ -322,8 +329,14 @@ npx tsc --noEmit
 
 `test_booking.py` couvre : panier mixte + paiement CB, haute saison,
 cohérence visit_date, scans (musée/séance/double-scan/autre jour),
-surbooking, multi-paiements POS (cash+ANCV, chèque réservé groupes),
-seuil groupe ≥ 8, `extra_show` fusionné, purge des paniers expirés.
+surbooking séquentiel (rejet 400 asserté), multi-paiements POS (cash+ANCV,
+chèque réservé groupes), seuil groupe ≥ 8, `extra_show` fusionné, purge des
+paniers expirés.
+
+`test_concurrency.py` (M1) démontre sous concurrence réelle (threads +
+barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
+→ exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
+accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
 
 **Catalogue seedé** (basse saison) : `museum_entry` 12/8/9 €,
 `theater_show` 10/7/8 €, `extra_show` 5/3,50/4 € (**add-on** : séance
@@ -348,7 +361,15 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
 - **Cahier des charges — 13 points** : feuille de route **immuable** ; les
   backlogs/DFC s'y ajoutent sans le modifier. Points nommés : **n°10**
   (billets contrôlés indépendamment, distinction valide/utilisé/annulé/
-  inexistant/autre séance/autre date) et **n°13** (concurrence/surbooking).
+  inexistant/autre séance/autre date), **n°12** (« une architecture
+  commune » — verbatim : *« Principe central : NE PAS multiplier les
+  logiques de réservation. Le site public (:3000), la caisse et
+  éventuellement d'autres interfaces utilisent les mêmes règles via un
+  MOTEUR MÉTIER unique. »*) et **n°13** (concurrence/surbooking).
+- **Document directeur** : `OBJECTIFS.md` (version opérationnelle qui fait
+  foi, transcrite du fichier Word
+  `Musee_des_Pirates_Objectifs_Professionnalisation.docx`) ; le pilotage
+  associé est `PILOTAGE.md`.
 - **DFC** (Documents Fondateurs Complémentaires) :
   - n°1 — modèle opérationnel (flux continu / séquencé / ponctuel, synergies,
     Pass « Journée » / « Capitaine »).
@@ -420,7 +441,10 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
 Cross-selling billetterie ↔ Taverne ; événementiel bi-mensuel au théâtre ;
 séances/visites en anglais ; vente B2B (scolaires, CE, TO) avec devis/acompte ;
 POS 100 % modulaire (configuration-driven UI) ; page d'accueil « coupe-file »
-live (spectacle imminent + places restantes, QR sur affiches physiques).
+live (spectacle imminent + places restantes, QR sur affiches physiques) ;
+module SAV/remboursements ; gestion de stock restaurant ; confirmation
+d'achat (billet PDF téléchargeable, lien unique de consultation,
+Apple/Google Wallet).
 
 ---
 
@@ -440,6 +464,13 @@ live (spectacle imminent + places restantes, QR sur affiches physiques).
   périmètre.
 - `TicketScanRequest` : pas d'authentification sur les endpoints (dev only,
   CORS ouvert).
+- Gotcha uvicorn : un redémarrage peut laisser un worker orphelin (le
+  filtre par nom de process ne le voit pas) — kill par PID puis relance
+  détachée (`Start-Process`).
+- Gotcha Windows : une stratégie de contrôle d'application (WDAC) a bloqué
+  `_greenlet.pyd` du venv → tout endpoint DB en 500. Résolu par
+  `pip install --force-reinstall --no-cache-dir greenlet` (binaire frais,
+  non issu du cache).
 - Canal en ligne volontairement **partiel** : la Taverne (flux libre) ne
   passe pas par la réservation en ligne.
 
@@ -465,20 +496,23 @@ live (spectacle imminent + places restantes, QR sur affiches physiques).
 - Enums PostgreSQL stockés en `str` via `values_callable` — migrations
   Alembic à générer par `--autogenerate` depuis `backend/`.
 
-### Règle de mise à jour (ce document + Honcho)
+### Règle de mise à jour
 
 > **À chaque session de travail qui modifie le code, le schéma, les règles
 > métier ou le backlog :**
 > 1. Mettre à jour la/les sections concernées de ce fichier et la date
 >    d'en-tête.
-> 2. Enregistrer la conclusion dans la mémoire Honcho (peer
->    `user-default-dev`) préfixée `[Musée des Pirates — état projet
->    AAAA-MM-JJ]` pour le regroupement temporel.
+> 2. **Si un milestone ou la position de maturité a changé** : mettre à jour
+>    `PILOTAGE.md` (et fermer l'issue GitHub associée via la PR).
+> 3. Optionnel : enregistrer une courte conclusion dans la mémoire Honcho
+>    (peer `user-default-dev`) préfixée `[Musée des Pirates — état projet
+>    AAAA-MM-JJ]` — couche de contexte facultative, jamais source de vérité.
 >
 > Voir `AGENTS.md` à la racine — la règle y est rappelée pour tout agent.
 
 ### Ce que Honcho ne retient pas verbatim
 
-Texte intégral des 13 points (seuls n°10 et n°13 ressortent), DFC n°4,
+Texte intégral des 13 points (seuls n°10, n°12 et n°13 ressortent), DFC n°4,
 corps détaillé des DFC n°2–3 — **ce fichier fait foi** pour ces contenus une
-fois complétés.
+fois complétés. Honcho accumule sans remplacer (doublons constatés) : ne
+jamais s'y fier sans recouper avec le dépôt.

@@ -341,11 +341,12 @@ async def main() -> None:
     })
     if status5a == 201:
         print("   => première commande pending, siège réservé avant paiement")
-    post(f"{BASE_URL}/reservations", {
+    status5b, _ = post(f"{BASE_URL}/reservations", {
         "customer_email": "hector.barbossa@blackpearl.fr",
         "items": [{"product_code": "theater_show", "category": "adult",
                    "session_id": ids["tiny"]}],
     })
+    assert status5b == 400, f"surbooking accepté : HTTP {status5b}"
 
     print("\nTest 6a — canal pos : multi-paiement ANCV + espèces avec rendu :")
     status6, resa6 = post(f"{BASE_URL}/reservations", {
