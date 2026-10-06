@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy==2.0.54
+asyncpg
+pydantic
+pydantic-settings
+alembic
+email-validator
+tzdata

@@ -1,0 +1,23 @@
+# Secrets & environnement
+.env
+.env.*
+*.pem
+*-token*.txt
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Divers
+.DS_Store
+Thumbs.db
