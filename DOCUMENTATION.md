@@ -511,11 +511,14 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   composition miroir ne recopie plus les droits déjà couverts (un pass au
   panier n'est pas recompté). Logique panier extraite dans `cart.ts`
   (fonctions pures) + 15 tests `cart.test.ts` (vitest, `npm test`).
-- 🚧 **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
-  `.github/workflows/ci.yml` implémenté — backend (Postgres service,
+- ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
+  `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend
-  (eslint + vitest + tsc). **Statut : implémenté** — première exécution
-  verte à démontrer au prochain push. Adoption de ruff au passage :
+  (eslint + vitest + `next typegen` + tsc). **Statut : démontré** — run
+  vert sur `main`
+  ([37576091825](https://github.com/pierremusee/museedespirates/actions/runs/37576091825))
+  après correction du typecheck CI (types de routes Next générés par
+  `next typegen`, absents sans build). Adoption de ruff au passage :
   enums migrés `str, enum.Enum` → `enum.StrEnum` (Python 3.11), idiome
   `Depends` déclaré, ~30 autofix (imports, `Union` → `|`, `Decimal`).
 

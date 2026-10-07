@@ -30,8 +30,8 @@ que les tests présents ; une simulation n'est pas une expérience réelle.
 | Niveau (OBJECTIFS.md §20) | Statut |
 |---|---|
 | 1 — Fonctionnel | **Atteint** : parcours web complets, E2E verte, scan validé physiquement |
-| 2 — Robuste | **Entamé** : règles métier testées ; concurrence **démontrée** (M1, 2026-10-06) ; paiements sans machine à états |
-| 3 — Professionnel | Non atteint : sécurité absente, pas de CI, observabilité quasi nulle |
+| 2 — Robuste | **Entamé** : règles métier testées ; concurrence **démontrée** (M1, 2026-10-06) ; preuves **rejouées en CI** (M2, 2026-10-07) ; paiements sans machine à états |
+| 3 — Professionnel | Non atteint : sécurité absente, observabilité quasi nulle (CI minimale en place depuis M2) |
 | 4 — Production simulée | Non atteint |
 | 5 — Référence portfolio | Non atteint : pas de README racine, un tiers ne peut pas installer seul |
 
@@ -46,11 +46,17 @@ sur jauge 5 → exactement 5 × 201, `booked_seats == 5`, zéro dépassement ;
 L'assertion manquante du test 5 (`test_booking.py`) a été ajoutée.
 Statut du mécanisme anti-surbooking : **démontré + reproductible**.
 
-**M2 — CI minimale : en cours** (issue GitHub #3, démarré 2026-10-07).
-Workflow `.github/workflows/ci.yml` implémenté (backend : Postgres +
-alembic + seed + uvicorn + test_booking + test_concurrency + ruff ;
-frontend : eslint + vitest + tsc) et les commandes sont rejouées vertes
-en local — reste à démontrer la première exécution CI verte au push.
+**M2 — CI minimale : terminée et validée (2026-10-07).**
+
+Preuve : run GitHub Actions vert sur `main` —
+[run 37576091825](https://github.com/pierremusee/museedespirates/actions/runs/37576091825)
+(job backend 50 s : Postgres 15 + alembic + seed + uvicorn +
+`test_booking.py` + `test_concurrency.py` + ruff ; job frontend 31 s :
+eslint + vitest 15 tests + `next typegen` + `tsc --noEmit`). Premier run
+37575952028 en échec (typecheck sans `.next/types`) corrigé par
+`next typegen` — itération démontrée. Statut : **démontré +
+reproductible** (chaque push/PR rejoue les preuves M1 et les tests).
+Issue #3 clôturée. Prochain milestone : M3 (README + install tiers).
 
 <details><summary>Critères de M1 (tous remplis)</summary>
 
@@ -76,8 +82,8 @@ Le backlog détaillé des chantiers (A–D) et la boîte à idées restent dans
 ## Écarts et risques principaux
 
 1. ~~Anti-surbooking non prouvé~~ → démontré par M1 (2026-10-06).
-2. Reproductibilité automatisée **en cours** : CI M2 implémentée (issue
-   #3) mais pas encore démontrée verte sur GitHub.
+2. ~~Aucune reproductibilité automatisée~~ → démontrée par M2
+   (2026-10-07, run CI vert sur `main`).
 3. Pas de README racine → un tiers ne peut pas installer le projet.
 4. Sécurité absente (aucune auth, CORS ouvert) — assumé « dev only », mais
    bloque le Niveau 3.
