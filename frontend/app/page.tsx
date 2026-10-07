@@ -21,13 +21,13 @@ export default function Home() {
             Musée des Pirates
           </CardTitle>
           <CardDescription className="text-base">
-            Embarquez pour une aventure au cœur de l'âge d'or de la piraterie :
+            Embarquez pour une aventure au cœur de l&rsquo;âge d&rsquo;or de la piraterie :
             expositions, Théâtre du Kraken et Taverne vous attendent.
           </CardDescription>
         </CardHeader>
         <CardContent className="text-center text-sm text-muted-foreground">
-          Réservez vos billets en ligne et évitez la file d'attente à
-          l'embarquement.
+          Réservez vos billets en ligne et évitez la file d&rsquo;attente à
+          l&rsquo;embarquement.
         </CardContent>
         <CardFooter className="justify-center">
           <Button asChild size="lg" className="gap-2">

@@ -1,6 +1,6 @@
 # Musée des Pirates — Documentation du projet
 
-> **Dernière mise à jour : 2026-10-06**
+> **Dernière mise à jour : 2026-10-07**
 > Ce document est la référence vivante du projet. Il doit être mis à jour à
 > chaque évolution (voir §13 — Maintenance). Cible : `OBJECTIFS.md` ;
 > pilotage : `PILOTAGE.md`. La mémoire Honcho (peer `user-default-dev`) est
@@ -100,7 +100,8 @@ musee/
     │   ├── (client)/reserver/        # page + date-picker + dialog
     │   ├── (client)/succes/          # confirmation + cartes-billets
     │   └── (admin)/scanner/          # contrôle d'accès QR
-    │   └── (admin)/caisse/           # terminal POS (pos-terminal.tsx)
+    │   └── (admin)/caisse/           # terminal POS (pos-terminal.tsx +
+    │                                 #   cart.ts moteur panier + cart.test.ts)
     ├── components/ui/                # shadcn/ui
     ├── components/                   # ticket-card, ticket-qr,
     │                                 # print-tickets-button (partagés)
@@ -309,7 +310,7 @@ serveur (`cache: "no-store"`) sur `NEXT_PUBLIC_API_URL`.
 | | `reservation-dialog.tsx` | Client : compteurs par tarif + profils gratuits, choix de séance(s), séance supplémentaire `extra_show` fusionnée, estimation live (re-calculée serveur), POST reservation + paiement CB simulé, redirect `/succes`. |
 | `/succes` | `(client)/succes/page.tsx` | Confirmation : lignes, total, référence, puis **cartes-billets** (`TicketCard`) + bouton « Imprimer les billets ». |
 | `/scanner` | `(admin)/scanner/page.tsx` | Client : sélecteur de poste (entrée musée / séances du jour), `@yudiel/react-qr-scanner`, verdict vert/rouge, warning justificatif, droits restants. |
-| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` (~1150 lignes) | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), miroir de la composition du panier à l'ajout d'un produit, suggestion « Pass 1 Spectacle » quand musée + séance sont vendus à l'unité (`passSuggestion`/`convertToPass`), séance supplémentaire par ligne (`addExtraShow`), multi-paiements avec rendu, annulation « Modifier la commande », émission/impression des cartes-billets. |
+| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` + `cart.ts` | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), composition miroir à l'ajout (uniquement des droits non encore couverts — `copiableCounts`), **optimisation automatique « Pass 1 Spectacle »** quand musée + séance à composition strictement identique coexistent (`strictPassHint` → lignes consommées supprimées, badge « Optimisé », toast d'économie ; cas partiels/ambigus = suggestion explicite `passSuggestion`), absorption des lignes simples au clic direct sur le Pass, séance supplémentaire par ligne (`addExtraShow`), multi-paiements avec rendu, annulation « Modifier la commande », émission/impression des cartes-billets. Logique panier extraite dans `cart.ts` (purs fonctions, testées par `cart.test.ts` — vitest). |
 
 **Billet carte (CR80, 85,6 × 54 mm)** — composant partagé
 `components/ticket-card.tsx` : QR (`ticket-qr.tsx`, ~23 mm, jeton =
@@ -354,6 +355,7 @@ alembic upgrade head
 # Frontend (depuis frontend/)
 npm run dev    # :3000
 npm run lint   # eslint
+npm test       # vitest — logique panier caisse (cart.test.ts)
 npx tsc --noEmit
 ```
 
@@ -483,6 +485,19 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   grille). Front : add-ons masqués dans la grille `/reserver` (proposés
   uniquement en option des produits à séance), `addExtraShow` du POS ne
   miroite que les lignes à séance.
+- ✅ **Optimisation automatique du panier caisse** (2026-10-07) : ajout
+  Musée + Théâtre à composition **strictement identique** → conversion
+  immédiate en Pass 1 Spectacle (lignes consommées supprimées — jamais de
+  doublon « entrée + pass » facturé), toast d'économie + badge
+  « Optimisé » sur la ligne ; clic direct sur le produit Pass **absorbe**
+  les lignes simples correspondantes au lieu de se superposer ; cas
+  partiels ou ambigus → suggestion explicite inchangée (jamais de
+  transformation silencieuse). Correctif du bug de consommation : le
+  budget `toMove` était partagé entre les deux familles de lignes — la
+  famille théâtre n'était jamais décrémentée et restait au panier. La
+  composition miroir ne recopie plus les droits déjà couverts (un pass au
+  panier n'est pas recompté). Logique panier extraite dans `cart.ts`
+  (fonctions pures) + 15 tests `cart.test.ts` (vitest, `npm test`).
 
 ### Backlog (feuille de route non figée)
 
@@ -525,8 +540,6 @@ Apple/Google Wallet).
 - `booked_seats` = personnes ≠ `COUNT(tickets)` après fusion gloutonne.
 - Limite `_emit_tickets` : deux achats distincts de même catégorie peuvent
   fusionner sur un même billet.
-- eslint : 4 erreurs pré-existantes dans `app/page.tsx` (apostrophes) — hors
-  périmètre.
 - `TicketScanRequest` : pas d'authentification sur les endpoints (dev only,
   CORS ouvert).
 - Gotcha uvicorn : sous Windows, `--reload` crée une chaîne reloader →

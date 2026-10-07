@@ -1,0 +1,309 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  absorbIntoPass,
+  addProductToCart,
+  copiableCounts,
+  lineEstimate,
+  passSuggestion,
+  strictPassHint,
+  zeroCounts,
+  type CartLine,
+  type Product,
+  type SessionOption,
+  type Tariff,
+} from "./cart";
+
+// Catalogue calqué sur backend/scripts/seed_db.py (grille basse saison).
+const MUSEUM: Product = {
+  code: "museum_entry",
+  label: "Entrée Musée",
+  kind: "simple",
+  price_adult: "12.00",
+  price_child: "8.00",
+  price_reduced: "9.00",
+  family_base_price: null,
+  extra_child_price: null,
+  is_addon: false,
+  components: [{ component_type: "museum_day", quantity: 1 }],
+};
+
+const SHOW: Product = {
+  code: "theater_show",
+  label: "Billet Théâtre — 1 séance",
+  kind: "simple",
+  price_adult: "10.00",
+  price_child: "7.00",
+  price_reduced: "8.00",
+  family_base_price: null,
+  extra_child_price: null,
+  is_addon: false,
+  components: [{ component_type: "theater_session", quantity: 1 }],
+};
+
+const EXTRA_SHOW: Product = {
+  code: "extra_show",
+  label: "Séance supplémentaire (tarif réduit)",
+  kind: "simple",
+  price_adult: "5.00",
+  price_child: "3.50",
+  price_reduced: "4.00",
+  family_base_price: null,
+  extra_child_price: null,
+  is_addon: true,
+  components: [{ component_type: "theater_session", quantity: 1 }],
+};
+
+const PASS: Product = {
+  code: "pass_1_show",
+  label: "Pass 1 Spectacle (Musée + Théâtre)",
+  kind: "pass",
+  price_adult: "20.00",
+  price_child: "13.00",
+  price_reduced: "15.00",
+  family_base_price: null,
+  extra_child_price: null,
+  is_addon: false,
+  components: [
+    { component_type: "museum_day", quantity: 1 },
+    { component_type: "theater_session", quantity: 1 },
+  ],
+};
+
+const PASS_2: Product = {
+  code: "pass_2_shows",
+  label: "Pass 2 Spectacles (Musée + 2 séances)",
+  kind: "pass",
+  price_adult: "24.00",
+  price_child: "16.00",
+  price_reduced: "18.00",
+  family_base_price: null,
+  extra_child_price: null,
+  is_addon: false,
+  components: [
+    { component_type: "museum_day", quantity: 1 },
+    { component_type: "theater_session", quantity: 2 },
+  ],
+};
+
+const FAMILY_MUSEUM: Product = {
+  code: "family_museum",
+  label: "Forfait Famille — Musée seul (2A + 2E)",
+  kind: "family",
+  price_adult: null,
+  price_child: null,
+  price_reduced: null,
+  family_base_price: "35.00",
+  extra_child_price: "6.00",
+  is_addon: false,
+  components: [{ component_type: "museum_day", quantity: 1 }],
+};
+
+const PRODUCTS = [MUSEUM, SHOW, EXTRA_SHOW, PASS, PASS_2, FAMILY_MUSEUM];
+
+const SESSIONS: SessionOption[] = [
+  { id: "s1", label: "14:00", show: "Le Kraken", remaining: 50, expired: false },
+  { id: "s2", label: "19:00", show: "Le Kraken", remaining: 50, expired: false },
+];
+
+function counts(patch: Partial<Record<Tariff, number>> = {}) {
+  return { ...zeroCounts(), ...patch };
+}
+
+function line(
+  id: number,
+  product: Product,
+  c: Record<Tariff, number>,
+  sessionIds: string[] = []
+): CartLine {
+  return {
+    id,
+    product,
+    counts: c,
+    groupSize: 8,
+    extraChildren: 0,
+    sessionIds,
+  };
+}
+
+describe("conversion automatique Musée + Théâtre → Pass 1 Spectacle", () => {
+  it("convertit quand les compositions sont strictement identiques", () => {
+    let r = addProductToCart([], MUSEUM, PRODUCTS, SESSIONS, 1);
+    expect(r.optimized).toBeNull();
+    expect(r.lines[0].product.code).toBe("museum_entry");
+
+    r = addProductToCart(r.lines, SHOW, PRODUCTS, SESSIONS, r.nextId);
+    expect(r.optimized?.persons).toBe(1);
+    expect(r.optimized?.savings).toBeCloseTo(2); // 12 + 10 − 20
+    expect(r.absorbed).toBe(false);
+
+    // Les lignes consommées disparaissent : jamais musée + pass ensemble.
+    expect(r.lines).toHaveLength(1);
+    const passLine = r.lines[0];
+    expect(passLine.product.code).toBe("pass_1_show");
+    expect(passLine.counts.adult).toBe(1);
+    expect(passLine.optimized).toBe(true);
+    expect(passLine.sessionIds).toEqual(["s1"]);
+    expect(lineEstimate(passLine, false)).toBe(20);
+  });
+
+  it("fonctionne aussi dans l'ordre Théâtre puis Musée", () => {
+    let r = addProductToCart([], SHOW, PRODUCTS, SESSIONS, 1);
+    r = addProductToCart(r.lines, MUSEUM, PRODUCTS, SESSIONS, r.nextId);
+    expect(r.optimized).not.toBeNull();
+    expect(r.lines.map((l) => l.product.code)).toEqual(["pass_1_show"]);
+  });
+
+  it("plusieurs personnes : toute la composition bascule sur le pass", () => {
+    let r = addProductToCart([], MUSEUM, PRODUCTS, SESSIONS, 1);
+    r = addProductToCart(r.lines, MUSEUM, PRODUCTS, SESSIONS, r.nextId); // 2A
+    r = addProductToCart(r.lines, SHOW, PRODUCTS, SESSIONS, r.nextId);
+    expect(r.lines).toHaveLength(1);
+    expect(r.lines[0].product.code).toBe("pass_1_show");
+    expect(r.lines[0].counts.adult).toBe(2);
+    expect(r.optimized?.persons).toBe(2);
+    expect(r.optimized?.savings).toBeCloseTo(4); // (12+10−20)×2
+  });
+
+  it("couvre les tarifs mixtes (adulte + enfant + profil gratuit)", () => {
+    const comp = counts({ adult: 1, child: 2, under_4: 1 });
+    const ls = [
+      line(1, MUSEUM, comp),
+      line(2, SHOW, comp, ["s2"]),
+    ];
+    const hint = strictPassHint(ls, PRODUCTS);
+    expect(hint?.persons).toBe(4);
+    expect(hint?.sessionId).toBe("s2");
+    const next = absorbIntoPass(ls, hint!, PASS, 3);
+    expect(next).toHaveLength(1);
+    expect(next[0].counts).toEqual(comp);
+  });
+
+  it("ne fusionne pas des compositions différentes (personnes distinctes)", () => {
+    // 1 adulte au musée, 1 enfant au théâtre : achats de personnes
+    // différentes — ni conversion auto ni suggestion.
+    const ls = [
+      line(1, MUSEUM, counts({ adult: 1 })),
+      line(2, SHOW, counts({ child: 1 }), ["s1"]),
+    ];
+    expect(strictPassHint(ls, PRODUCTS)).toBeNull();
+    expect(passSuggestion(ls, PRODUCTS)).toBeNull();
+  });
+
+  it("ignore un panier 100 % gratuit (aucune économie)", () => {
+    const ls = [
+      line(1, MUSEUM, counts({ under_4: 1 })),
+      line(2, SHOW, counts({ under_4: 1 }), ["s1"]),
+    ];
+    expect(strictPassHint(ls, PRODUCTS)).toBeNull();
+  });
+});
+
+describe("conversion partielle — suggestion explicite conservée", () => {
+  const partial = () => [
+    line(1, MUSEUM, counts({ adult: 2 })),
+    line(2, SHOW, counts({ adult: 1 }), ["s1"]),
+  ];
+
+  it("pas de conversion automatique sur composition asymétrique", () => {
+    // L'agent renchérit le musée : 3A musée vs 1A théâtre reste ambigu.
+    const r = addProductToCart(partial(), MUSEUM, PRODUCTS, SESSIONS, 3);
+    expect(r.optimized).toBeNull();
+    expect(
+      r.lines.find((l) => l.product.code === "museum_entry")?.counts.adult
+    ).toBe(3);
+    // Mais la suggestion manuelle reste disponible pour 1 personne.
+    const hint = passSuggestion(r.lines, PRODUCTS);
+    expect(hint?.persons).toBe(1);
+  });
+
+  it("la conversion manuelle conserve le reliquat musée", () => {
+    const hint = passSuggestion(partial(), PRODUCTS)!;
+    const next = absorbIntoPass(partial(), hint, PASS, 3);
+    expect(next).toHaveLength(2);
+    expect(
+      next.find((l) => l.product.code === "museum_entry")?.counts.adult
+    ).toBe(1);
+    expect(
+      next.find((l) => l.product.code === "pass_1_show")?.counts.adult
+    ).toBe(1);
+  });
+});
+
+describe("ajout direct du Pass", () => {
+  it("absorbe les lignes simples correspondantes déjà au panier", () => {
+    const ls = [
+      line(1, MUSEUM, counts({ adult: 1 })),
+      line(2, SHOW, counts({ adult: 1 }), ["s1"]),
+    ];
+    const r = addProductToCart(ls, PASS, PRODUCTS, SESSIONS, 3);
+    expect(r.absorbed).toBe(true);
+    expect(r.lines).toHaveLength(1);
+    expect(r.lines[0].product.code).toBe("pass_1_show");
+    expect(r.lines[0].sessionIds).toEqual(["s1"]);
+  });
+
+  it("s'ajoute comme ligne normale sans lignes à absorber", () => {
+    const r = addProductToCart([], PASS, PRODUCTS, SESSIONS, 1);
+    expect(r.absorbed).toBe(false);
+    expect(r.optimized).toBeNull();
+    expect(r.lines).toHaveLength(1);
+    expect(r.lines[0].product.code).toBe("pass_1_show");
+    expect(r.lines[0].counts.adult).toBe(1);
+  });
+
+  it("conserve les lignes non concernées (forfait famille)", () => {
+    const ls = [
+      line(1, FAMILY_MUSEUM, zeroCounts()),
+      line(2, MUSEUM, counts({ adult: 1 })),
+      line(3, SHOW, counts({ adult: 1 }), ["s1"]),
+    ];
+    const r = addProductToCart(ls, PASS, PRODUCTS, SESSIONS, 4);
+    expect(r.absorbed).toBe(true);
+    expect(r.lines).toHaveLength(2);
+    expect(r.lines.some((l) => l.product.code === "family_museum")).toBe(true);
+  });
+});
+
+describe("panier après optimisation", () => {
+  function optimizedCart() {
+    const first = addProductToCart([], MUSEUM, PRODUCTS, SESSIONS, 1);
+    return addProductToCart(first.lines, SHOW, PRODUCTS, SESSIONS, first.nextId);
+  }
+
+  it("la ligne pass reste modifiable et le total se recalcule", () => {
+    const r = optimizedCart();
+    const bumped = r.lines.map((l) => ({
+      ...l,
+      counts: { ...l.counts, adult: l.counts.adult + 1 },
+    }));
+    expect(bumped[0].counts.adult).toBe(2);
+    expect(bumped[0].optimized).toBe(true);
+    const total = bumped.reduce((s, l) => s + lineEstimate(l, false), 0);
+    expect(total).toBe(40);
+  });
+
+  it("la suppression de la ligne vide le panier sans relique", () => {
+    const r = optimizedCart();
+    const remaining = r.lines.filter((l) => l.id !== r.lines[0].id);
+    expect(remaining).toHaveLength(0);
+  });
+});
+
+describe("miroir de composition à l'ajout", () => {
+  it("ne recopie pas les droits déjà couverts par un pass au panier", () => {
+    const ls = [line(1, PASS, counts({ adult: 2, child: 1 }), ["s1"])];
+    // Ajouter un billet théâtre pour un nouveau visiteur ne doit pas
+    // recompter les 3 personnes déjà couvertes par le pass.
+    const c = copiableCounts(ls, SHOW);
+    expect(c.adult).toBe(1);
+    expect(c.child).toBe(0);
+  });
+
+  it("recopie les lignes musée lors de l'ajout d'un billet théâtre", () => {
+    const ls = [line(1, MUSEUM, counts({ adult: 2, child: 1 }))];
+    const c = copiableCounts(ls, SHOW);
+    expect(c.adult).toBe(2);
+    expect(c.child).toBe(1);
+  });
+});
