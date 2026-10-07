@@ -85,5 +85,9 @@ jobs:
       - name: Unit tests (vitest)
         run: npm test
 
+      # Les types de routes (LayoutProps, PageProps…) sont générés dans
+      # .next/types — absents sans build : next typegen les produit.
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: |
+          npx next typegen
+          npx tsc --noEmit
