@@ -1,0 +1,24 @@
+[tool.ruff]
+target-version = "py311"
+# Migrations générées par `alembic revision --autogenerate` : hors lint.
+extend-exclude = ["alembic/versions", "venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF", "ASYNC", "DTZ", "FURB"]
+# E501 (longueur de ligne) relève du formateur, pas du lint.
+ignore = ["E501"]
+
+# FastAPI : Depends/Query/Path en valeur par défaut sont l'idiome attendu.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+]
+
+# Scripts de test/outillage : HTTP bloquant dans l'async et date.today()
+# y sont assumés (fixtures à jours relatifs, pas de code de production).
+[tool.ruff.lint.per-file-ignores]
+"scripts/**" = ["DTZ", "ASYNC210", "RUF001"]

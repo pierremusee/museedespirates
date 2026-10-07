@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
@@ -120,7 +120,7 @@ async def scan_ticket(
             detail="Ce billet ne donne pas droit à cette entrée",
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     now_paris = now.astimezone(MUSEUM_TZ)
     today = now_paris.date()
 

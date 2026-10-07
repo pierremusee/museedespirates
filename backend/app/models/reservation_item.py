@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from app.models.ticket import Ticket
 
 
-class FreeProfile(str, enum.Enum):
+class FreeProfile(enum.StrEnum):
     """Profil de gratuité (DFC n°6) — ticket émis à 0 €, jamais sans billet."""
 
     UNDER_4 = "under_4"            # < 4 ans -> ticket enfant

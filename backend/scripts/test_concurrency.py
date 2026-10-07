@@ -110,14 +110,14 @@ async def seed() -> dict:
         wanted = {
             "concurrency_theater": Product(
                 code="concurrency_theater", label="Concurrence Théâtre",
-                kind=ProductKind.SIMPLE, price_adult=Decimal("10"),
+                kind=ProductKind.SIMPLE, price_adult=Decimal(10),
                 components=[ProductComponent(
                     component_type=ComponentType.THEATER_SESSION,
                     quantity=1)],
             ),
             "concurrency_museum": Product(
                 code="concurrency_museum", label="Concurrence Musée",
-                kind=ProductKind.SIMPLE, price_adult=Decimal("5"),
+                kind=ProductKind.SIMPLE, price_adult=Decimal(5),
                 components=[ProductComponent(
                     component_type=ComponentType.MUSEUM_DAY,
                     quantity=1, event_id=musee.id)],

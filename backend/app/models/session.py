@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer
@@ -52,5 +52,5 @@ class Session(Base):
     def is_expired(self) -> bool:
         """Début + tolérance dépassé : ni vendable ni scannable."""
         return (
-            datetime.now(timezone.utc) > self.start_time + LATE_TOLERANCE
+            datetime.now(UTC) > self.start_time + LATE_TOLERANCE
         )

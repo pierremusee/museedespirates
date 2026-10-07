@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from app.models.session import Session
 
 
-class EventType(str, enum.Enum):
+class EventType(enum.StrEnum):
     PERMANENT_EXHIBITION = "permanent_exhibition"
     THEATER = "theater"
     GUIDED_TOUR = "guided_tour"

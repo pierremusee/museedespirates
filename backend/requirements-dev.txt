@@ -1,0 +1,2 @@
+# Outils de développement / CI — ne pas déployer en production.
+ruff==0.16.10

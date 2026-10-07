@@ -70,6 +70,7 @@ Commits signés `pierremusee <338410385+pierremusee@users.noreply.github.com>`.
 
 ```
 musee/
+├── .github/workflows/ci.yml    # CI M2 : Postgres + tests + lints
 ├── docker-compose.yml          # PostgreSQL 15 + healthcheck
 ├── .env                        # DATABASE_URL
 ├── DOCUMENTATION.md            # ← ce fichier
@@ -78,6 +79,8 @@ musee/
 ├── gemini-code-1791050970318.md      # mission fondatrice frontend
 ├── backend/
 │   ├── requirements.txt
+│   ├── requirements-dev.txt    # ruff (lint CI/local)
+│   ├── pyproject.toml          # config ruff
 │   ├── alembic.ini, alembic/         # migrations (12 versions)
 │   ├── venv/
 │   ├── app/
@@ -349,6 +352,7 @@ Start-Process -FilePath ".\venv\Scripts\python.exe" `
   -WorkingDirectory "C:\Users\pierr\dev\musee\backend" -WindowStyle Hidden
 ./venv/Scripts/python.exe scripts/test_booking.py # suite E2E
 ./venv/Scripts/python.exe scripts/test_concurrency.py  # preuve concurrence (M1)
+./venv/Scripts/ruff.exe check .                   # lint backend (config : pyproject.toml)
 alembic revision --autogenerate -m "..."          # nouvelle migration
 alembic upgrade head
 
@@ -373,6 +377,15 @@ expirées.
 barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
 → exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
 accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
+
+**CI (M2)** : `.github/workflows/ci.yml` — déclenchée sur push `main` et PR.
+Job **backend** : service Postgres 15 (`postgres:15-alpine`),
+`alembic upgrade head` + `seed_db.py`, uvicorn démarré en fond + attente
+`/health`, puis `test_booking.py` et `test_concurrency.py` ; lint `ruff
+check .` (config `backend/pyproject.toml` : règles E/F/W/I/B/UP/RUF/ASYNC/
+DTZ/FURB, `Depends` FastAPI déclaré immutable-calls, E501 off, migrations
+générées exclues, scripts de test dispensés de DTZ/ASYNC210/RUF001).
+Job **frontend** : `npm ci`, `eslint`, `vitest`, `tsc --noEmit`.
 
 **Cycle de vie des fixtures** (2026-10-06) : `test_booking.py` et
 `test_concurrency.py` activent leurs objets de test au seed (`is_active`)
@@ -498,6 +511,13 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   composition miroir ne recopie plus les droits déjà couverts (un pass au
   panier n'est pas recompté). Logique panier extraite dans `cart.ts`
   (fonctions pures) + 15 tests `cart.test.ts` (vitest, `npm test`).
+- 🚧 **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
+  `.github/workflows/ci.yml` implémenté — backend (Postgres service,
+  alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend
+  (eslint + vitest + tsc). **Statut : implémenté** — première exécution
+  verte à démontrer au prochain push. Adoption de ruff au passage :
+  enums migrés `str, enum.Enum` → `enum.StrEnum` (Python 3.11), idiome
+  `Depends` déclaré, ~30 autofix (imports, `Union` → `|`, `Decimal`).
 
 ### Backlog (feuille de route non figée)
 

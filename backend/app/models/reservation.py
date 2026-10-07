@@ -15,14 +15,14 @@ if TYPE_CHECKING:
     from app.models.ticket import Ticket
 
 
-class ReservationStatus(str, enum.Enum):
+class ReservationStatus(enum.StrEnum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
     EXPIRED = "expired"  # panier abandonné : purge après TTL, jauge libérée
 
 
-class SalesChannel(str, enum.Enum):
+class SalesChannel(enum.StrEnum):
     """Canal de vente (DFC n°7) : web = billetterie en ligne (CB unique),
     pos = guichet physique / taverne (multi-paiements)."""
 

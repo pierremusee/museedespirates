@@ -166,22 +166,22 @@ async def seed() -> dict:
             "theater_show": simple("theater_show", "Billet Théâtre", "10", "7", "8", [theater_comp()]),
             "extra_show": Product(code="extra_show", label="Séance supplémentaire (test)", kind=ProductKind.SIMPLE,
                     is_addon=True,
-                    price_adult=Decimal("5"), price_child=Decimal("3.50"),
-                    price_reduced=Decimal("4"),
+                    price_adult=Decimal(5), price_child=Decimal("3.50"),
+                    price_reduced=Decimal(4),
                     components=[theater_comp()]),
             "pass_1_show": Product(code="pass_1_show", label="Pass 1 Spectacle", kind=ProductKind.PASS,
-                    price_adult=Decimal("20"), price_child=Decimal("13"),
-                    price_reduced=Decimal("15"),
+                    price_adult=Decimal(20), price_child=Decimal(13),
+                    price_reduced=Decimal(15),
                     components=[museum_comp(), theater_comp()]),
             "pass_2_shows": Product(code="pass_2_shows", label="Pass 2 Spectacles", kind=ProductKind.PASS,
-                    price_adult=Decimal("24"), price_child=Decimal("16"),
-                    price_reduced=Decimal("18"),
+                    price_adult=Decimal(24), price_child=Decimal(16),
+                    price_reduced=Decimal(18),
                     components=[museum_comp(), theater_comp(2)]),
             "family_museum": Product(code="family_museum", label="Famille Musée", kind=ProductKind.FAMILY,
-                    family_base_price=Decimal("35"), extra_child_price=Decimal("6"),
+                    family_base_price=Decimal(35), extra_child_price=Decimal(6),
                     components=[museum_comp()]),
             "group_visit": Product(code="group_visit", label="Visite Groupe (test)", kind=ProductKind.GROUP,
-                    price_adult=Decimal("10"),
+                    price_adult=Decimal(10),
                     components=[museum_comp()]),
         }
         existing_codes = set(
@@ -311,7 +311,7 @@ async def main() -> None:
         s_pay, paid = pay(resa["id"], "cb", "87.00")
         if s_pay == 201:
             assert paid["reservation_status"] == "confirmed"
-            assert Decimal(paid["amount_due"]) == Decimal("0")
+            assert Decimal(paid["amount_due"]) == Decimal(0)
             tickets = paid["tickets"]
             accesses = [a for t in tickets for a in t["accesses"]]
             n_open = sum(1 for a in accesses if a["access_type"] == "open_ticket")
@@ -391,7 +391,7 @@ async def main() -> None:
         scan(tid_wrong["id"], {"session_id": acc_wrong["session_id"]})
 
     print("\nTest 5 — surbooking : une commande pending tient déjà la jauge (jauge 1) :")
-    status5a, resa_tiny = post(f"{BASE_URL}/reservations", {
+    status5a, _resa_tiny = post(f"{BASE_URL}/reservations", {
         "customer_email": "will.turner@blackpearl.fr",
         "items": [{"product_code": "theater_show", "category": "adult",
                    "session_id": ids["tiny"]}],

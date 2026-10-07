@@ -45,7 +45,12 @@ sur jauge 5 → exactement 5 × 201, `booked_seats == 5`, zéro dépassement ;
 `./venv/Scripts/python.exe scripts/test_concurrency.py` (depuis `backend/`).
 L'assertion manquante du test 5 (`test_booking.py`) a été ajoutée.
 Statut du mécanisme anti-surbooking : **démontré + reproductible**.
-Prochain milestone : M2 (CI minimale) — ne démarre qu'après validation.
+
+**M2 — CI minimale : en cours** (issue GitHub #3, démarré 2026-10-07).
+Workflow `.github/workflows/ci.yml` implémenté (backend : Postgres +
+alembic + seed + uvicorn + test_booking + test_concurrency + ruff ;
+frontend : eslint + vitest + tsc) et les commandes sont rejouées vertes
+en local — reste à démontrer la première exécution CI verte au push.
 
 <details><summary>Critères de M1 (tous remplis)</summary>
 
@@ -71,8 +76,8 @@ Le backlog détaillé des chantiers (A–D) et la boîte à idées restent dans
 ## Écarts et risques principaux
 
 1. ~~Anti-surbooking non prouvé~~ → démontré par M1 (2026-10-06).
-2. Aucune reproductibilité automatisée (pas de CI ; les suites exigent une
-   stack lancée à la main et écrivent directement en base).
+2. Reproductibilité automatisée **en cours** : CI M2 implémentée (issue
+   #3) mais pas encore démontrée verte sur GitHub.
 3. Pas de README racine → un tiers ne peut pas installer le projet.
 4. Sécurité absente (aucune auth, CORS ouvert) — assumé « dev only », mais
    bloque le Niveau 3.

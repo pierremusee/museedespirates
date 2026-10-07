@@ -13,14 +13,14 @@ if TYPE_CHECKING:
     from app.models.reservation_item import ReservationItem
 
 
-class ProductKind(str, enum.Enum):
+class ProductKind(enum.StrEnum):
     SIMPLE = "simple"
     PASS = "pass"
     FAMILY = "family"
     GROUP = "group"  # vente groupe : minimum 8 personnes
 
 
-class ComponentType(str, enum.Enum):
+class ComponentType(enum.StrEnum):
     MUSEUM_DAY = "museum_day"
     THEATER_SESSION = "theater_session"
     DINING_SESSION = "dining_session"

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from app.models.ticket_access import TicketAccess
 
 
-class TicketCategory(str, enum.Enum):
+class TicketCategory(enum.StrEnum):
     ADULT = "adult"
     CHILD = "child"
     REDUCED = "reduced"
@@ -21,7 +21,7 @@ class TicketCategory(str, enum.Enum):
     SCHOOL = "school"
 
 
-class TicketType(str, enum.Enum):
+class TicketType(enum.StrEnum):
     """Type d'accès (DFC n°2/n°3) : pilote la règle de validation au scan."""
 
     OPEN_TICKET = "open_ticket"          # Musée : valide à la journée civile
@@ -29,7 +29,7 @@ class TicketType(str, enum.Enum):
     SESSION_DINING = "session_dining"      # Dîner-spectacle : séance + repas
 
 
-class MenuChoice(str, enum.Enum):
+class MenuChoice(enum.StrEnum):
     VIANDE = "viande"
     POISSON = "poisson"
     VEGETARIEN = "vegetarien"

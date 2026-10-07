@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from app.models.reservation import Reservation
 
 
-class PaymentMethod(str, enum.Enum):
+class PaymentMethod(enum.StrEnum):
     """Moyens de paiement (DFC n°7).
 
     - cb    : carte bancaire — seul moyen du canal web, aussi au guichet
@@ -28,7 +28,7 @@ class PaymentMethod(str, enum.Enum):
     CHECK = "check"
 
 
-class PaymentStatus(str, enum.Enum):
+class PaymentStatus(enum.StrEnum):
     COMPLETED = "completed"
     # Valeurs futures envisagées : refunded, cancelled.
 

@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
@@ -35,7 +35,7 @@ async def list_events(
 
     if date is not None:
         day_start = datetime.combine(date, time.min, tzinfo=MUSEUM_TZ).astimezone(
-            timezone.utc
+            UTC
         )
         day_end = day_start + timedelta(days=1)
         stmt = (

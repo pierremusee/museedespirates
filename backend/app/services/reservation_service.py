@@ -1,6 +1,6 @@
 import uuid
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -150,7 +150,7 @@ def _session_slots(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"Produit « {product.code} » modifié depuis la "
                     "commande : séances manquantes, billets non émis",
-                )
+                ) from None
     return slots
 
 
@@ -312,7 +312,7 @@ async def create_reservation(
         if product.kind != ProductKind.FAMILY and item_in.extra_children:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"extra_children n'a de sens que pour un forfait famille",
+                detail="extra_children n'a de sens que pour un forfait famille",
             )
         if product.kind == ProductKind.GROUP:
             if (
@@ -402,7 +402,7 @@ async def create_reservation(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Séance introuvable",
             )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for session in sessions.values():
             if not session.event.is_active:
                 raise HTTPException(
@@ -805,7 +805,7 @@ async def purge_expired_reservations(
     réservation en `expired` et restitue les places de chaque séance
     touchée, au prorata des personnes prévues par item.
     """
-    cutoff = datetime.now(timezone.utc) - ttl
+    cutoff = datetime.now(UTC) - ttl
     result = await db.execute(
         select(Reservation)
         .options(
