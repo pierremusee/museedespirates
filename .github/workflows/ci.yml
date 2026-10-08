@@ -53,6 +53,37 @@ jobs:
           alembic upgrade head
           python scripts/seed_db.py
 
+      # Base dédiée aux tests pytest : les fixtures y écrivent puis
+      # rollbackent — jamais de fuite vers musee_db.
+      - name: Create + migrate test DB (musee_test)
+        run: |
+          psql postgresql://postgres:password@localhost:5432/postgres -c "CREATE DATABASE musee_test"
+          alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:password@localhost:5432/musee_test
+
+      # Dérive modèles ↔ migrations : échoue si le schéma réel diffère de
+      # ce que les modèles déclarent.
+      - name: Alembic check (migration drift)
+        run: alembic check
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:password@localhost:5432/musee_test
+
+      # Suite métier pytest (règles de validation, flux réservation,
+      # tarification) + coverage avec plancher anti-régression (65 %).
+      - name: Pytest + coverage
+        run: pytest --cov=app --cov-report=term-missing --cov-report=xml
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:password@localhost:5432/musee_test
+
+      - name: Upload backend coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-backend
+          path: backend/coverage.xml
+          if-no-files-found: ignore
+
       - name: Start API
         run: |
           nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 &
@@ -89,8 +120,10 @@ jobs:
       - name: Lint (eslint)
         run: npm run lint
 
-      - name: Unit tests (vitest)
-        run: npm test
+      # Vitest + coverage v8 (plancher 80 % sur la logique front testable :
+      # app/**/*.ts + lib/**/*.ts — voir vitest.config.ts).
+      - name: Unit tests + coverage (vitest)
+        run: npm test -- --coverage
 
       # Les types de routes (LayoutProps, PageProps…) sont générés dans
       # .next/types — absents sans build : next typegen les produit.

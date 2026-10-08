@@ -22,3 +22,25 @@ extend-immutable-calls = [
 # y sont assumés (fixtures à jours relatifs, pas de code de production).
 [tool.ruff.lint.per-file-ignores]
 "scripts/**" = ["DTZ", "ASYNC210", "RUF001"]
+# Fixtures à jours relatifs (séances invendables une fois passées).
+"tests/**" = ["DTZ"]
+
+[tool.pytest.ini_options]
+# Suite métier (tests/) — les preuves E2E/concurrence restent dans
+# scripts/ et passent par l'API HTTP réelle.
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+# Le coverage mesure le code métier réellement testable — pas les
+# migrations générées ni les scripts de preuve E2E.
+source = ["app"]
+omit = ["app/main.py"]
+
+[tool.coverage.report]
+show_missing = true
+# Plancher anti-régression fixé sous la baseline mesurée (70 %, dont
+# app/services ~89 %) — marge pour les couches déjà couvertes par les E2E
+# (api/*, 0 % ici car exercées via HTTP dans un autre processus).
+fail_under = 65

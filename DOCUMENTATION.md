@@ -79,8 +79,8 @@ musee/
 ├── gemini-code-1791050970318.md      # mission fondatrice frontend
 ├── backend/
 │   ├── requirements.txt
-│   ├── requirements-dev.txt    # ruff (lint CI/local)
-│   ├── pyproject.toml          # config ruff
+│   ├── requirements-dev.txt    # ruff + pytest/pytest-asyncio/pytest-cov
+│   ├── pyproject.toml          # config ruff + pytest + coverage
 │   ├── alembic.ini, alembic/         # migrations (12 versions)
 │   ├── venv/
 │   ├── app/
@@ -93,9 +93,16 @@ musee/
 │   │   │                             # tickets, admin
 │   │   └── services/                 # reservation_service, ticket_service,
 │   │                                 # pricing  ← moteur métier unique
-│   └── scripts/
-│       ├── seed_db.py                # catalogue + événements (idempotent)
-│       └── test_booking.py           # suite E2E via API HTTP
+│   ├── scripts/
+│   │   ├── seed_db.py                # catalogue + événements (idempotent)
+│   │   ├── test_booking.py           # suite E2E via API HTTP
+│   │   └── test_concurrency.py       # preuve concurrence (M1)
+│   └── tests/                        # suite métier pytest (PostgreSQL
+│       ├── conftest.py               #   musee_test, isolation transaction
+│       ├── factories.py              #   rollbackée par test)
+│       ├── test_pricing.py
+│       ├── test_reservation_rules.py
+│       └── test_reservation_flow.py
 └── frontend/
     ├── app/
     │   ├── page.tsx                  # accueil
@@ -355,11 +362,23 @@ Start-Process -FilePath ".\venv\Scripts\python.exe" `
 ./venv/Scripts/ruff.exe check .                   # lint backend (config : pyproject.toml)
 alembic revision --autogenerate -m "..."          # nouvelle migration
 alembic upgrade head
+alembic check                                     # dérive modèles↔migrations
+
+# Tests métier pytest — base dédiée musee_test (à créer une fois) :
+psql postgresql://postgres:password@localhost:5432/postgres \
+  -c "CREATE DATABASE musee_test"
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/musee_test \
+  alembic upgrade head
+pytest                       # 49 tests métier — isolation : transaction
+                             # rollbackée par test, jamais de seed nécessaire
+pytest --cov=app --cov-report=term-missing --cov-report=xml
+                             # coverage (plancher 65 % — pyproject.toml)
 
 # Frontend (depuis frontend/)
 npm run dev    # :3000
 npm run lint   # eslint
 npm test       # vitest — logique panier caisse (cart.test.ts)
+npm test -- --coverage   # + coverage v8 (plancher 80 %, vitest.config.ts)
 npx tsc --noEmit
 ```
 
@@ -384,14 +403,41 @@ barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
 → exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
 accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
 
+**Suite métier pytest** (2026-10-08) : `backend/tests/` — 49 tests en
+~5 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
+données de dev). Isolation : chaque test tourne dans une transaction
+externe rollbackée (`join_transaction_mode="create_savepoint"` — les
+`commit()` internes des services libèrent un savepoint, le rollback final
+tout annule). `conftest.py` fournit `db`, `catalog` (mini-catalogue
+basse saison) et `high_season` ; `factories.py` les helpers de création.
+`test_pricing.py` : modificateurs tarifaires et bornes de saison.
+`test_reservation_rules.py` : matrice de validation de `create_reservation`
+(20 rejets auparavant ni testés ni exercés : `free_profile` sur famille/
+groupe, `disability` sans catégorie, PMR sans porteur, add-on sans droit
+de base, séance expirée, capacité…). `test_reservation_flow.py` : flux
+complet pending → payé → billets (fusion gloutonne par catégorie),
+annulation (restitution de jauge, encaissements conservés, rejets).
+Coverage `pytest-cov` — baseline mesurée **70 %** sur `app/` (dont
+`app/services/` ~89 % : pricing 100 %, reservation_service 86 %,
+ticket_service 0 % — les `api/*` à 0 % sont exercées par l'E2E dans un
+autre processus) ; plancher `fail_under=65`. Coverage frontend via
+`@vitest/coverage-v8` — baseline **87 %** (cart.ts 87 %, plancher 80 %
+dans `vitest.config.ts`). Rapports (`.coverage`, `coverage.xml`,
+`htmlcov/`, `coverage/`) ignorés par git.
+
 **CI (M2)** : `.github/workflows/ci.yml` — déclenchée sur push `main` et PR.
 Job **backend** : service Postgres 15 (`postgres:15-alpine`),
-`alembic upgrade head` + `seed_db.py`, uvicorn démarré en fond + attente
-`/health`, puis `test_booking.py` et `test_concurrency.py` ; lint `ruff
+`alembic upgrade head` + `seed_db.py` sur `musee_db`, création +
+migration de `musee_test`, `alembic check` (dérive modèles↔migrations),
+`pytest --cov` (plancher 65 %, rapport `coverage.xml` conservé en
+artefact), uvicorn démarré en fond + attente `/health`, puis
+`test_booking.py` et `test_concurrency.py` ; lint `ruff
 check .` (config `backend/pyproject.toml` : règles E/F/W/I/B/UP/RUF/ASYNC/
 DTZ/FURB, `Depends` FastAPI déclaré immutable-calls, E501 off, migrations
-générées exclues, scripts de test dispensés de DTZ/ASYNC210/RUF001).
-Job **frontend** : `npm ci`, `eslint`, `vitest`, `next typegen` +
+générées exclues, scripts de test dispensés de DTZ/ASYNC210/RUF001,
+tests/ de DTZ — fixtures à jours relatifs).
+Job **frontend** : `npm ci`, `eslint`, `vitest --coverage` (plancher
+80 %), `next typegen` +
 `tsc --noEmit`, puis **`next build`** (les pages qui fetch sont dynamiques
 `no-store` — aucun appel API au build ; `NEXT_PUBLIC_API_URL` posée car
 inlinée au build dans les composants clients). Robustesse : groupe
@@ -534,6 +580,15 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   `timeout-minutes`. `main` protégé contre force-push/suppression.
   Preuve de régression temporaire : suite rouge sur refus ANCV/web
   neutralisé, verte après revert (run CI 37746023295).
+- ✅ **pytest + coverage** (2026-10-08) : `backend/tests/` — 49 tests
+  métier contre `musee_test` (PostgreSQL réel, isolation par transaction
+  rollbackée) : tarification, matrice de validation de
+  `create_reservation` (20 règles jusque-là non testées), flux
+  réservation/paiement/billets/annulation dont fusion gloutonne.
+  Coverage : `pytest-cov` backend (baseline 70 % `app/`, ~89 %
+  `app/services/`, plancher 65 %) et `@vitest/coverage-v8` frontend
+  (baseline 87 %, plancher 80 %). CI : `alembic check`, étape pytest+cov,
+  artefact `coverage-backend`, `vitest --coverage`.
 - ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
   `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend

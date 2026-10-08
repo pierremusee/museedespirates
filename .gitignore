@@ -18,6 +18,12 @@ node_modules/
 out/
 *.tsbuildinfo
 
+# Rapports de couverture (backend coverage.py / frontend vitest v8)
+.coverage
+coverage.xml
+htmlcov/
+coverage/
+
 # Document directeur (original humain — OBJECTIFS.md fait foi dans le dépôt)
 Musee_des_Pirates_Objectifs_Professionnalisation.docx
 
