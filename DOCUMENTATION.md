@@ -403,8 +403,8 @@ barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
 → exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
 accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-08) : `backend/tests/` — 49 tests en
-~5 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
+**Suite métier pytest** (2026-10-08) : `backend/tests/` — 67 tests en
+~6 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
 `commit()` internes des services libèrent un savepoint, le rollback final
@@ -417,10 +417,20 @@ groupe, `disability` sans catégorie, PMR sans porteur, add-on sans droit
 de base, séance expirée, capacité…). `test_reservation_flow.py` : flux
 complet pending → payé → billets (fusion gloutonne par catégorie),
 annulation (restitution de jauge, encaissements conservés, rejets).
-Coverage `pytest-cov` — baseline mesurée **70 %** sur `app/` (dont
-`app/services/` ~89 % : pricing 100 %, reservation_service 86 %,
-ticket_service 0 % — les `api/*` à 0 % sont exercées par l'E2E dans un
-autre processus) ; plancher `fail_under=65`. Coverage frontend via
+`test_scan.py` : contrôle d'accès `scan_ticket` — 404, mauvais poste
+(musée↔séance, mauvais événement), double scan avec message daté,
+journée civile musée, fenêtre séance ±30 min **avec borne exacte**
+(horloge figée à 14h00 Paris via `monkeypatch` sur `datetime` du module —
+déterministe, zéro dépendance à l'heure réelle ; `start_time` déplacé
+après émission réelle des billets), consommation indépendante des accès
+d'un même QR, `control_warning` des 3 profils de gratuité. Branches
+défensives documentées non testées : « sans séance associée »
+(inatteignable sous FK), fallback « déjà utilisé » sans date, libellé
+dîner-spectacle (aucun produit ne l'émet).
+Coverage `pytest-cov` — `app/` **77 %**, `app/services/` **~88 %**
+(pricing 100 %, reservation_service 86 %, ticket_service 98 % — les
+`api/*` à 0 % sont exercées par l'E2E dans un autre processus) ;
+plancher `fail_under=65`. Coverage frontend via
 `@vitest/coverage-v8` — baseline **87 %** (cart.ts 87 %, plancher 80 %
 dans `vitest.config.ts`). Rapports (`.coverage`, `coverage.xml`,
 `htmlcov/`, `coverage/`) ignorés par git.
@@ -585,10 +595,15 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   rollbackée) : tarification, matrice de validation de
   `create_reservation` (20 règles jusque-là non testées), flux
   réservation/paiement/billets/annulation dont fusion gloutonne.
-  Coverage : `pytest-cov` backend (baseline 70 % `app/`, ~89 %
+  Coverage : `pytest-cov` backend (baseline 70 % `app/`, ~73 %
   `app/services/`, plancher 65 %) et `@vitest/coverage-v8` frontend
   (baseline 87 %, plancher 80 %). CI : `alembic check`, étape pytest+cov,
   artefact `coverage-backend`, `vitest --coverage`.
+- ✅ **Tests scan `ticket_service`** (2026-10-08) : `test_scan.py` —
+  18 tests (mauvais poste, double scan daté, journée civile musée,
+  fenêtre séance avec borne exacte des 30 min sous horloge figée,
+  consommation indépendante des accès, `control_warning` des 3
+  gratuités). `ticket_service.py` : 0 % → 98 % ; `app/` : 70 % → 77 %.
 - ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
   `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend
