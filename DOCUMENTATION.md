@@ -491,9 +491,11 @@ invariants au seed.
 supplémentaire, exige un billet/pass à séance dans la commande),
 `pass_1_show` 20/13/15 €, `pass_2_shows` 24/16/18 €, `family_museum`
 35 € (+6 €/enfant sup.), `family_pass_1_show` 58 € (+10 €/enfant sup.). Haute saison seedée :
-2026-07-01 → 2026-08-31. Théâtre du Kraken : **deux productions** en
-carte — « **À l'Abordage !** » à **10h30** et « **Les Conjurés** » à
-**15h00**, jauge 80, 7 jours glissants. Chaque pièce est un événement
+2026-07-01 → 2026-08-31. Théâtre du Kraken : **quatre productions** en
+carte — « **À l'Abordage !** » à **10h30**, « **L'École des Pirates** » à
+**11h45**, « **Les Conjurés** » à **15h00** et « **Le Repaire de
+Barbe-Froide** » à **16h30** (2 le matin, 2 l'après-midi), jauge 80,
+7 jours glissants. Chaque pièce est un événement
 `theater` distinct avec sa `description` (le seed renomme via la clé
 `former` au lieu de créer des doublons). L'événement salle historique
 « Théâtre du Kraken » est désactivé (`is_active=false`) ; ses séances
@@ -549,11 +551,13 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
 - ✅ Règle groupes ≥ 8 ; gratuités DFC n°6 ; haute saison DFC n°5.
 - ✅ Correctifs post-revue externe : FOR UPDATE sur accès, `len(session_ids)`
   strict, filtre `is_scanned`, 409 différé, 400 `museum_day`.
-- ✅ **Programmation théâtre** (2026-10-06) : 2 productions distinctes au
-  Théâtre du Kraken — « À l'Abordage ! » (10h30) et « Les Conjurés »
-  (15h00) — `events.description`, titre de la pièce affiché en
-  billetterie (`/reserver`), modale, caisse, postes du scanner, verdict
-  de scan (`access_label`) et accès des billets (`session_event_title`).
+- ✅ **Programmation théâtre** (2026-10-06, enrichie 2026-10-08) : 4
+  productions distinctes au Théâtre du Kraken — « À l'Abordage ! »
+  (10h30), « L'École des Pirates » (11h45), « Les Conjurés » (15h00) et
+  « Le Repaire de Barbe-Froide » (16h30) — `events.description`, titre
+  de la pièce affiché en billetterie (`/reserver`), modale, caisse,
+  postes du scanner, verdict de scan (`access_label`) et accès des
+  billets (`session_event_title`).
 - ✅ `test_booking.py` résilient au ménage du catalogue : réactive son
   événement « Théâtre (test) » et re-pointe tous les composants musée
   vers « Musée des Pirates » (suite E2E à nouveau verte).

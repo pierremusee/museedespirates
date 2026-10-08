@@ -48,6 +48,22 @@ SHOWS = [
         "minute": 30,
     },
     {
+        "title": "L'École des Pirates",
+        "description": (
+            "Le capitaine Barbe-Rousse a reçu un ultimatum : sa licence de "
+            "corsaire ne sera renouvelée que si quatre jeunes moussaillons "
+            "réussissent l'examen de la Compagnie. Problème : ses recrues "
+            "sont incapables de manier un sabre sans se marcher dessus. "
+            "Entre cours de nœuds catastrophiques, leçons de cri de guerre "
+            "et assauts de polochons, la relève du Black Kraken n'est pas "
+            "prête. Un spectacle jeune public interactif où les enfants de "
+            "la salle deviennent, l'espace d'une heure, les professeurs de "
+            "ces pirates débutants."
+        ),
+        "hour": 11,
+        "minute": 45,
+    },
+    {
         "title": "Les Conjurés",
         # Renommage 2026-10-06 (ex « La Malédiction de l'Île aux Brumes »).
         "former": "La Malédiction de l'Île aux Brumes",
@@ -61,6 +77,20 @@ SHOWS = [
         ),
         "hour": 15,
         "minute": 0,
+    },
+    {
+        "title": "Le Repaire de Barbe-Froide",
+        "description": (
+            "Chaque soir, dans le repaire de Barbe-Froide, les pirates les "
+            "plus en vue du port se retrouvent autour d'un rhum épicé. Mais "
+            "ce soir-là, la carte du trésor de l'Île aux Brumes a disparu. "
+            "Une serveuse observatrice, quatre suspects trop bavards et un "
+            "perroquet qui répète tout : le coupable est dans la salle. Un "
+            "polar maritime comique où le public mène l'enquête — et vote "
+            "l'épilogue."
+        ),
+        "hour": 16,
+        "minute": 30,
     },
 ]
 
