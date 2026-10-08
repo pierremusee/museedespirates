@@ -403,8 +403,8 @@ barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
 → exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
 accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-08) : `backend/tests/` — 89 tests en
-~35 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
+**Suite métier pytest** (2026-10-08) : `backend/tests/` — 100 tests en
+~25 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
 `commit()` internes des services libèrent un savepoint, le rollback final
@@ -435,10 +435,15 @@ couvre en plus catégorie manquante, incohérence `visit_date`/séance du
 Pass et catalogue corrompu (produit sans droit, composant musée sans
 événement, événement inactif, groupe sans tarif) ; `test_pricing.py`
 couvre les tarifs famille et groupe, basse et haute saison.
-Coverage `pytest-cov` — `app/` **79 %**, `app/services/` **~94 %**
-(pricing 100 %, reservation_service 93 % — il ne reste que la purge
-(808-854, lot dédié) et le garde d'idempotence 172 — ticket_service
-98 % ; les `api/*` à 0 % sont exercées par l'E2E dans un autre
+`test_purge.py` : TTL 15 min sous horloge figée — `pending` expiré
+libère la jauge, `pending` récent / `confirmed` / `cancelled` anciens
+conservés, sélectivité sur séance partagée, restitution multi-items et
+multi-séances, séance supprimée sans crash, **borne exacte** du cutoff
+(`<` strict paramétré ±1 s).
+Coverage `pytest-cov` — `app/` **81 %**, `app/services/` **~99,5 %**
+(pricing 100 %, reservation_service 99 % — seule ligne manquante :
+garde d'idempotence 172, défensive — ticket_service 98 % ; les
+`api/*` à 0 % sont exercées par l'E2E dans un autre
 processus) ; plancher `fail_under=65`. Coverage frontend via
 `@vitest/coverage-v8` — baseline **87 %** (cart.ts 87 %, plancher 80 %
 dans `vitest.config.ts`). Rapports (`.coverage`, `coverage.xml`,
@@ -621,6 +626,16 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   `reservation_service.py` : 86 % → 93 % ; `services/` : ~88 % → ~94 % ;
   `app/` : 77 % → 79 %. Reste : la purge (mini-lot dédié) et la garde
   d'idempotence d'émission (défensive, documentée).
+- ✅ **Tests purge** (2026-10-08) : `test_purge.py` — 11 tests sous
+  horloge figée (`created_at` positionné relativement au cutoff) :
+  expiration/libération du `pending`, conservation des récents et des
+  commandes `confirmed`/`cancelled`, sélectivité multi-commandes sur
+  une séance, restitution multi-items/multi-séances, séance supprimée,
+  borne exacte `created_at == cutoff` (paramétrée ±1 s).
+  `reservation_service.py` : 93 % → **99 %** ; `services/` : ~94 % →
+  **~99,5 %** ; `app/` : 79 % → 81 %. Il ne reste dans `services/` que
+  2 lignes défensives documentées (garde d'idempotence d'émission,
+  « accès sans séance » inatteignable sous FK).
 - ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
   `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend
