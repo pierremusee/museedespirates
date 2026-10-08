@@ -647,6 +647,12 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   `response_model` (détecterait un `MissingGreenlet`), 404 propre.
   Toute la couche HTTP est maintenant exercée par l'E2E — pas de suite
   ASGI jugée nécessaire à ce stade.
+- ✅ **Protocole « fonctionnalité + filet de tests »** (2026-10-08) :
+  règle permanente dans `AGENTS.md` — analyse d'impact avant code,
+  niveau de test choisi selon le risque (pytest / E2E / concurrence /
+  vitest), coverage en plancher jamais en objectif, aucune
+  modification métier pour faire passer un test, clôture = tests +
+  régression + CI verts.
 - ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
   `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend

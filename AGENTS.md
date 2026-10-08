@@ -60,6 +60,51 @@ Règles du mode :
   idées de `DOCUMENTATION.md` — jamais à un milestone automatique.
 - L'implémentation ne démarre que sur accord explicite de Pierre.
 
+## Protocole de développement — chaque fonctionnalité livrée avec son filet de tests
+
+Socle de référence (2026-10-08) : 100 tests pytest, `app/services/`
+~99,5 %, `app/` 81 % (plancher 65 %), les 11 endpoints HTTP exercés
+par l'E2E, concurrence M1 démontrée, frontend vitest (plancher 80 %) +
+eslint + tsc + build, `alembic check` — le tout rejoué en CI.
+
+**Avant** toute fonctionnalité ou modification fonctionnelle
+significative, analyser sans coder : l'existant, les
+services/modèles/endpoints/frontend concernés, les comportements
+métier à garantir, les tests existants affectés, les risques de
+régression. Périmètre important → plan présenté à Pierre avant toute
+modification.
+
+**Niveau de test choisi selon le risque**, jamais tous les niveaux par
+défaut :
+
+- pytest pour une règle métier isolée (`app/services/`) ;
+- E2E `test_booking.py` quand la fonction traverse réellement l'API et
+  plusieurs composants ;
+- `test_concurrency.py` uniquement s'il existe un risque de race
+  condition réel (jauge, double-scan…) ;
+- vitest pour la logique frontend concernée ;
+- plusieurs niveaux si la valeur le justifie — jamais de doublon
+  inutile entre unitaire/intégration/E2E.
+
+**Coverage ≠ qualité** : le pourcentage est un plancher
+anti-régression, jamais un objectif. Les tests visent les scénarios
+nominaux, les erreurs importantes, les bornes, les transitions
+d'état, les conséquences métier et les régressions plausibles. Aucun
+test écrit uniquement pour faire monter un chiffre ; les branches
+défensives/inatteignables sont documentées, pas testées
+artificiellement.
+
+**Protection de l'existant** : jamais de modification du code métier
+pour faire passer un test. Si un test révèle une anomalie, une
+régression ou une ambiguïté métier → arrêt, description précise du
+comportement observé, et décision de Pierre avant toute correction.
+
+**Clôture** : nouveaux tests verts + régression pertinente + `ruff` +
+`alembic check` + frontend si concerné + CI verte. Le compte rendu
+indique : modifications, tests ajoutés et leur pertinence, cas
+volontairement non testés, résultats de chaque vérification, warnings
+ou dette découverts.
+
 ## Conventions du projet
 
 - Nomenclature : « **le Complexe** » désigne uniquement l'ensemble
