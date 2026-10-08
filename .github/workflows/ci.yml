@@ -5,9 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Un nouveau push sur la même ref annule le run devenu obsolète.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # borne anti-hang (run observé ~1 min)
     services:
       postgres:
         image: postgres:15-alpine
@@ -64,6 +70,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # borne anti-hang (run observé ~1 min)
     defaults:
       run:
         working-directory: frontend
@@ -91,3 +98,13 @@ jobs:
         run: |
           npx next typegen
           npx tsc --noEmit
+
+      # tsc vérifie les types, pas le build (frontière Server/Client,
+      # bundling). Les pages qui fetch sont dynamiques (no-store) :
+      # aucun appel API au build. NEXT_PUBLIC_* est inlinée au build
+      # dans les composants clients — posée explicitement pour être
+      # déterministe.
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
