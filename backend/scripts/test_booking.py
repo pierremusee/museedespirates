@@ -14,6 +14,9 @@ puis via l'API :
   6. Chantier B — canal pos : multi-paiement cash (rendu) + ANCV
      (nominal > solde, aucun rendu), chèque refusé hors groupes,
      restrictions canal web, rejet d'un paiement sur commande soldée.
+  7. Lecture : GET /products, /seasonal/check, /reservations/{id} —
+     smoke HTTP : statut, données attendues, sérialisation complète du
+     response_model (aucun lazy-loading/MissingGreenlet).
 
 Lancer depuis backend/ :  ./venv/Scripts/python.exe scripts/test_booking.py
 """
@@ -291,6 +294,19 @@ def post(url: str, payload: dict | None = None) -> tuple[int, dict]:
         status = e.code
     print(f"-> HTTP {status}")
     print(json.dumps(body, indent=2, ensure_ascii=False))
+    return status, body
+
+
+def get(url: str) -> tuple[int, dict | list]:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        resp = urllib.request.urlopen(req)
+        body = json.loads(resp.read().decode())
+        status = resp.status
+    except urllib.error.HTTPError as e:
+        body = json.loads(e.read().decode() or "{}")
+        status = e.code
+    print(f"-> HTTP {status}")
     return status, body
 
 
@@ -731,6 +747,54 @@ async def main() -> None:
            "test 11 — réservation inconnue")
     # La re-réservation reste pending : la purge la libérera (jetable).
     print("=> OK : annulation rejetée sur confirmée/annulée/inconnue")
+
+    print("\nTest 12 — endpoints de lecture : /products, /seasonal/check, "
+          "/reservations/{id} :")
+
+    # 12a — catalogue actif : liste ProductRead complète, composants
+    # inclus (selectinload — un lazy-loading pendant la sérialisation
+    # lèverait MissingGreenlet et renverrait 500).
+    products = expect(get(f"{BASE_URL}/products"), 200,
+                      "test 12a — GET /products")
+    assert isinstance(products, list) and products
+    by_code = {p["code"]: p for p in products}
+    for code in ("museum_entry", "theater_show", "extra_show",
+                 "pass_1_show", "pass_2_shows", "family_museum",
+                 "group_visit"):
+        assert code in by_code, f"produit seedé absent du catalogue : {code}"
+    p1 = by_code["pass_1_show"]
+    assert p1["kind"] == "pass"
+    assert {c["component_type"] for c in p1["components"]} == {
+        "museum_day", "theater_session"}
+    assert Decimal(by_code["museum_entry"]["price_adult"]) == Decimal(12)
+    print(f"   => {len(products)} produits actifs, composants sérialisés")
+
+    # 12b — même règle de saison que la grille tarifaire : low_day hors
+    # de toute période, HIGH_DAY couvert par « HS test ».
+    chk_low = expect(get(f"{BASE_URL}/seasonal/check?date={low}"),
+                     200, "test 12b — seasonal/check basse saison")
+    assert chk_low == {"date": low, "high_season": False}
+    chk_high = expect(get(f"{BASE_URL}/seasonal/check?date={high}"),
+                      200, "test 12b — seasonal/check haute saison")
+    assert chk_high == {"date": high, "high_season": True}
+    print(f"   => {low} = basse saison, {high} = haute saison")
+
+    # 12c — la commande du test 1 relue par l'API : graphe complet
+    # items/tickets/accès/paiements sérialisé + 404 propre sur inconnu.
+    r = expect(get(f"{BASE_URL}/reservations/{resa['id']}"),
+               200, "test 12c — GET /reservations/{id}")
+    assert r["id"] == resa["id"] and r["status"] == "confirmed"
+    assert r["customer_email"] == "jack.sparrow@blackpearl.fr"
+    assert Decimal(r["total_price"]) == Decimal("87.00")
+    assert len(r["items"]) == 4
+    assert len(r["tickets"]) == 8 and len(r["payments"]) == 1
+    titles = {a["session_event_title"]
+              for t in r["tickets"] for a in t["accesses"]
+              if a["access_type"] == "session_standard"}
+    assert titles == {"Théâtre (test)"}
+    expect(get(f"{BASE_URL}/reservations/{uuid.uuid4()}"),
+           404, "test 12c — réservation inconnue")
+    print("   => graphe complet sérialisé, 404 propre sur inconnu")
 
 
 async def run() -> None:

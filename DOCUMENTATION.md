@@ -389,7 +389,11 @@ groupes), seuil groupe ≥ 8, `extra_show` fusionné, purge des paniers
 expirés, fenêtre de vente des séances (tolérance vendue+scannée, expirée
 refusée), **annulation guichet** (restitution de jauge prouvée
 fonctionnellement sur séance cap-1, encaissements conservés, rejets
-400/404). **Depuis 2026-10-08, chaque appel est une assertion bloquante**
+400/404), **lecture GET** : `/products` (catalogue actif + composants),
+`/seasonal/check` (BS/HS cohérents avec le seed) et
+`/reservations/{id}` (graphe complet relu + 404) — smoke HTTP qui
+garantit la sérialisation des `response_model` sans lazy-loading
+(`MissingGreenlet`). **Depuis 2026-10-08, chaque appel est une assertion bloquante**
 (helper `expect`) : les rejets autrefois affichés sans vérification et les
 gardes `if status == 201:` qui sautaient les assertions en cas d'échec ont
 été éliminés — une régression métier fait échouer la suite (prouvé par
@@ -636,6 +640,13 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   **~99,5 %** ; `app/` : 79 % → 81 %. Il ne reste dans `services/` que
   2 lignes défensives documentées (garde d'idempotence d'émission,
   « accès sans séance » inatteignable sous FK).
+- ✅ **Smoke tests HTTP de lecture** (2026-10-08) : `test_booking.py`
+  test 12 — les 3 derniers GET non exercés (`/products`,
+  `/seasonal/check`, `/reservations/{id}`) sont désormais assertés en
+  E2E : statut, données seedées attendues, sérialisation complète des
+  `response_model` (détecterait un `MissingGreenlet`), 404 propre.
+  Toute la couche HTTP est maintenant exercée par l'E2E — pas de suite
+  ASGI jugée nécessaire à ce stade.
 - ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
   `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend
