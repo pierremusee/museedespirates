@@ -403,8 +403,8 @@ barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
 → exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
 accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-08) : `backend/tests/` — 67 tests en
-~6 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
+**Suite métier pytest** (2026-10-08) : `backend/tests/` — 89 tests en
+~35 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
 `commit()` internes des services libèrent un savepoint, le rollback final
@@ -426,11 +426,20 @@ après émission réelle des billets), consommation indépendante des accès
 d'un même QR, `control_warning` des 3 profils de gratuité. Branches
 défensives documentées non testées : « sans séance associée »
 (inatteignable sous FK), fallback « déjà utilisé » sans date, libellé
-dîner-spectacle (aucun produit ne l'émet).
-Coverage `pytest-cov` — `app/` **77 %**, `app/services/` **~88 %**
-(pricing 100 %, reservation_service 86 %, ticket_service 98 % — les
-`api/*` à 0 % sont exercées par l'E2E dans un autre processus) ;
-plancher `fail_under=65`. Coverage frontend via
+dîner-spectacle (aucun produit ne l'émet). `test_payments.py` :
+garde-fous d'encaissement (404, commande soldée/expirée, chèque réservé
+aux groupes dans les deux sens, CB/chèque au-delà du solde, ANCV
+partiel au POS) et intégrité « commande → paiement » — produit modifié
+ou séance supprimée entre-temps → **409** ; `test_reservation_rules.py`
+couvre en plus catégorie manquante, incohérence `visit_date`/séance du
+Pass et catalogue corrompu (produit sans droit, composant musée sans
+événement, événement inactif, groupe sans tarif) ; `test_pricing.py`
+couvre les tarifs famille et groupe, basse et haute saison.
+Coverage `pytest-cov` — `app/` **79 %**, `app/services/` **~94 %**
+(pricing 100 %, reservation_service 93 % — il ne reste que la purge
+(808-854, lot dédié) et le garde d'idempotence 172 — ticket_service
+98 % ; les `api/*` à 0 % sont exercées par l'E2E dans un autre
+processus) ; plancher `fail_under=65`. Coverage frontend via
 `@vitest/coverage-v8` — baseline **87 %** (cart.ts 87 %, plancher 80 %
 dans `vitest.config.ts`). Rapports (`.coverage`, `coverage.xml`,
 `htmlcov/`, `coverage/`) ignorés par git.
@@ -604,6 +613,14 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   fenêtre séance avec borne exacte des 30 min sous horloge figée,
   consommation indépendante des accès, `control_warning` des 3
   gratuités). `ticket_service.py` : 0 % → 98 % ; `app/` : 70 % → 77 %.
+- ✅ **Tests encaissement `add_payment`** (2026-10-08) :
+  `test_payments.py` (11) + extensions rules/pricing/flow (11) —
+  garde-fous d'état (404, soldée, expirée), chèque groupe (les deux
+  sens), dépassements de solde, ANCV partiel, 409 produit modifié /
+  séance supprimée entre commande et paiement, annulation sans séance.
+  `reservation_service.py` : 86 % → 93 % ; `services/` : ~88 % → ~94 % ;
+  `app/` : 77 % → 79 %. Reste : la purge (mini-lot dédié) et la garde
+  d'idempotence d'émission (défensive, documentée).
 - ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
   `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend

@@ -286,6 +286,24 @@ async def test_annulation_inconnue_404(db):
     assert e.value.status_code == 404
 
 
+async def test_annulation_seance_supprimee(db, catalog):
+    # Séance retirée entre commande et annulation : la restitution de
+    # jauge ignore simplement la séance introuvable, l'annulation passe.
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="adult",
+                session_id=catalog.session.id,
+            )
+        ),
+    )
+    await db.delete(catalog.session)
+    await db.flush()
+    cancelled = await cancel_reservation(db, resa.id)
+    assert cancelled.status == ReservationStatus.CANCELLED
+
+
 # --- Tarification figée ------------------------------------------------------
 
 

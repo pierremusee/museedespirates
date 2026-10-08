@@ -6,18 +6,33 @@ Ici chaque cas vise la règle directement au niveau service.
 """
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
 
-from app.models import FreeProfile, SalesChannel, Session
+from app.models import (
+    ComponentType,
+    EventType,
+    FreeProfile,
+    ProductComponent,
+    ProductKind,
+    SalesChannel,
+    Session,
+)
 from app.schemas.reservation import (
     ReservationCreate,
     ReservationItemCreate,
 )
 from app.services.reservation_service import create_reservation
-from tests.factories import MUSEUM_TZ, add_session
+from tests.factories import (
+    MUSEUM_TZ,
+    add_event,
+    add_product,
+    add_session,
+    museum_comp,
+)
 
 
 def item(code: str, **kw) -> ReservationItemCreate:
@@ -32,6 +47,10 @@ def order(*items: ReservationItemCreate, channel=SalesChannel.WEB):
 
 def day_of(session: Session) -> date:
     return session.start_time.astimezone(MUSEUM_TZ).date()
+
+
+def paris_today() -> date:
+    return datetime.now(MUSEUM_TZ).date()
 
 
 async def test_produit_inconnu(db, catalog, today):
@@ -344,3 +363,119 @@ async def test_evenement_inactif(db, catalog):
             ),
         )
     assert e.value.status_code == 400
+
+
+async def test_categorie_manquante_produit_simple(db, catalog, today):
+    # Sans free_profile ni category, impossible de déterminer les
+    # personnes couvertes par l'item.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db, order(item("museum_entry", visit_date=today))
+        )
+    assert e.value.status_code == 400
+    assert "Catégorie tarifaire requise" in e.value.detail
+
+
+async def test_pass_visit_date_incoherente(db, catalog):
+    # Pass « Journée » : la séance choisie doit être le jour de visite.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "pass_1_show", category="adult",
+                    visit_date=paris_today() + timedelta(days=3),
+                    session_id=catalog.session.id,
+                )
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "ne coïncide pas" in e.value.detail
+
+
+async def test_produit_sans_aucun_droit(db, catalog, today):
+    # Catalogue corrompu : produit vendable qui n'ouvre ni journée
+    # musée ni séance — rien à dater, refus explicite.
+    await add_product(
+        db,
+        code="empty_product",
+        label="Produit vide",
+        kind=ProductKind.SIMPLE,
+        price_adult=Decimal("5.00"),
+        components=[],
+    )
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db, order(item("empty_product", category="adult"))
+        )
+    assert e.value.status_code == 400
+    assert "ni journée ni séance" in e.value.detail
+
+
+async def test_composant_musee_sans_evenement(db, catalog, today):
+    # Catalogue corrompu : droit musée sans événement rattaché.
+    await add_product(
+        db,
+        code="museum_no_event",
+        label="Musée sans événement",
+        kind=ProductKind.SIMPLE,
+        price_adult=Decimal("5.00"),
+        components=[
+            ProductComponent(
+                component_type=ComponentType.MUSEUM_DAY,
+                quantity=1,
+                event_id=None,
+            )
+        ],
+    )
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db, order(item("museum_no_event", category="adult", visit_date=today))
+        )
+    assert e.value.status_code == 400
+    assert "mal configuré" in e.value.detail
+
+
+async def test_evenement_musee_inactif(db, catalog, today):
+    musee_off = await add_event(
+        db, "Musée fermé (pytest)", EventType.PERMANENT_EXHIBITION,
+        is_active=False,
+    )
+    await add_product(
+        db,
+        code="museum_off",
+        label="Musée inactif",
+        kind=ProductKind.SIMPLE,
+        price_adult=Decimal("5.00"),
+        components=[
+            ProductComponent(
+                component_type=ComponentType.MUSEUM_DAY,
+                quantity=1,
+                event_id=musee_off.id,
+            )
+        ],
+    )
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db, order(item("museum_off", category="adult", visit_date=today))
+        )
+    assert e.value.status_code == 400
+    assert "inactif ou introuvable" in e.value.detail
+
+
+async def test_groupe_sans_prix_par_personne(db, catalog, today):
+    # Catalogue corrompu : produit groupe sans tarif unitaire.
+    await add_product(
+        db,
+        code="group_no_price",
+        label="Groupe sans prix",
+        kind=ProductKind.GROUP,
+        price_adult=None,
+        components=[museum_comp(catalog.musee)],
+    )
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db, order(item("group_no_price", group_size=8, visit_date=today))
+        )
+    assert e.value.status_code == 400
+    assert "prix par personne manquant" in e.value.detail
