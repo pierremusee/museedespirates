@@ -1,6 +1,6 @@
 # Musée des Pirates — Documentation du projet
 
-> **Dernière mise à jour : 2026-10-07**
+> **Dernière mise à jour : 2026-10-08**
 > Ce document est la référence vivante du projet. Il doit être mis à jour à
 > chaque évolution (voir §13 — Maintenance). Cible : `OBJECTIFS.md` ;
 > pilotage : `PILOTAGE.md`. La mémoire Honcho (peer `user-default-dev`) est
@@ -365,13 +365,19 @@ npx tsc --noEmit
 
 `test_booking.py` couvre : panier mixte + paiement CB, haute saison,
 cohérence visit_date, scans (musée/séance/double-scan/autre jour),
-surbooking séquentiel (rejet 400 asserté), multi-paiements POS (cash+ANCV,
-chèque réservé groupes), seuil groupe ≥ 8, `extra_show` fusionné, purge des
-paniers expirés, fenêtre de vente des séances (tolérance vendue+scannée,
-expirée refusée). Jours de test **relatifs** (`LOW_DAY`=J+9, `HIGH_DAY`=J+45
-couvert par une période « HS test » recalée à chaque run) — nécessaire
-depuis la règle de vente des séances : des dates figées finiraient
-expirées.
+surbooking séquentiel, multi-paiements POS (cash+ANCV, chèque réservé
+groupes), seuil groupe ≥ 8, `extra_show` fusionné, purge des paniers
+expirés, fenêtre de vente des séances (tolérance vendue+scannée, expirée
+refusée), **annulation guichet** (restitution de jauge prouvée
+fonctionnellement sur séance cap-1, encaissements conservés, rejets
+400/404). **Depuis 2026-10-08, chaque appel est une assertion bloquante**
+(helper `expect`) : les rejets autrefois affichés sans vérification et les
+gardes `if status == 201:` qui sautaient les assertions en cas d'échec ont
+été éliminés — une régression métier fait échouer la suite (prouvé par
+régression temporaire sur le refus ANCV/web). Jours de test **relatifs** :
+`HIGH_DAY`=J+45 couvert par « HS test » ; `LOW_DAY` est **choisi au seed**
+hors de toute `SeasonalPeriod` existante et hors de la fenêtre « HS test »
+(reproductible toute l'année, y compris en juillet-août).
 
 `test_concurrency.py` (M1) démontre sous concurrence réelle (threads +
 barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
@@ -385,7 +391,16 @@ Job **backend** : service Postgres 15 (`postgres:15-alpine`),
 check .` (config `backend/pyproject.toml` : règles E/F/W/I/B/UP/RUF/ASYNC/
 DTZ/FURB, `Depends` FastAPI déclaré immutable-calls, E501 off, migrations
 générées exclues, scripts de test dispensés de DTZ/ASYNC210/RUF001).
-Job **frontend** : `npm ci`, `eslint`, `vitest`, `tsc --noEmit`.
+Job **frontend** : `npm ci`, `eslint`, `vitest`, `next typegen` +
+`tsc --noEmit`, puis **`next build`** (les pages qui fetch sont dynamiques
+`no-store` — aucun appel API au build ; `NEXT_PUBLIC_API_URL` posée car
+inlinée au build dans les composants clients). Robustesse : groupe
+`concurrency` (run obsolète annulé par ref) et `timeout-minutes` 15/10.
+
+**Protection de `main`** (2026-10-08) : force-push et suppression de la
+branche bloqués, y compris pour les admins. Pas de PR obligatoire ni de
+status check requis — workflow solo : les pushes directs restent possibles
+et la CI rejoue les preuves à chaque push.
 
 **Cycle de vie des fixtures** (2026-10-06) : `test_booking.py` et
 `test_concurrency.py` activent leurs objets de test au seed (`is_active`)
@@ -511,6 +526,14 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   composition miroir ne recopie plus les droits déjà couverts (un pass au
   panier n'est pas recompté). Logique panier extraite dans `cart.ts`
   (fonctions pures) + 15 tests `cart.test.ts` (vitest, `npm test`).
+- ✅ **Fiabilisation tests & CI** (2026-10-08) : `test_booking.py` —
+  tous les rejets et toutes les créations sont des assertions bloquantes
+  (helper `expect`), test 11 « annulation » (restitution de jauge,
+  encaissements conservés, 400/404), `LOW_DAY` choisi dynamiquement hors
+  périodes saisonnières. CI : `next build` ajouté, `concurrency` +
+  `timeout-minutes`. `main` protégé contre force-push/suppression.
+  Preuve de régression temporaire : suite rouge sur refus ANCV/web
+  neutralisé, verte après revert (run CI 37746023295).
 - ✅ **CI minimale (M2)** (2026-10-07, issue GitHub #3) : workflow
   `.github/workflows/ci.yml` — backend (Postgres service,
   alembic + seed + uvicorn + suites E2E/concurrence, ruff) et frontend
@@ -555,9 +578,9 @@ Apple/Google Wallet).
   (`cleanup()`) et les réactivent au seed : le catalogue reste propre sans
   intervention manuelle. Limite assumée : un `kill -9` en plein run laisse
   les fixtures actives jusqu'au run suivant.
-- `SeasonalPeriod` « HS test » : un doublon ajouté à chaque run de
-  `test_booking.py` (mêmes dates que la vraie haute saison) — sans effet
-  fonctionnel ni visibilité, accumulation interne seulement.
+- `SeasonalPeriod` « HS test » : purgée puis recréée à chaque run de
+  `test_booking.py` (fenêtre recalée autour de `HIGH_DAY`) — une seule
+  ligne subsiste, la vraie haute saison n'est pas touchée.
 - Le scan ne vérifie pas `reservation.status` — à durcir si annulation/
   remboursement post-confirmation est ajouté.
 - `booked_seats` = personnes ≠ `COUNT(tickets)` après fusion gloutonne.
