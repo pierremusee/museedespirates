@@ -82,3 +82,34 @@ export function posResolution(
   if (status === "cancelled" || status === "expired") return "abandon";
   return "blocked";
 }
+
+// Vérification de l'opération persistée au rechargement : lecture GET
+// + décision. Extraite pour être testable avec un fetch injecté — les
+// effets de bord (state React, storage, toasts) restent dans le
+// composant.
+export type PosCheckResult = {
+  action: PosResolution;
+  detail: { status?: unknown; payments?: unknown[] } | null;
+};
+
+export async function resolveStoredPending(
+  apiFetch: typeof fetch,
+  apiUrl: string,
+  pending: PosPendingPayment
+): Promise<PosCheckResult> {
+  let httpOk = false;
+  let detail: PosCheckResult["detail"] = null;
+  try {
+    const res = await apiFetch(
+      `${apiUrl}/reservations/${pending.reservationId}`,
+      { cache: "no-store" }
+    );
+    httpOk = res.ok;
+    if (res.ok) detail = (await res.json().catch(() => null));
+  } catch {
+    // Injoignable → blocked
+  }
+  const status =
+    typeof detail?.status === "string" ? detail.status : null;
+  return { action: posResolution(httpOk, status), detail };
+}

@@ -292,7 +292,11 @@ n'est pas résolue. Règle cardinale : **un échec de lecture n'est jamais
 assimilé à un abandon** — si `GET /reservations/{id}` échoue ou ne
 permet pas d'établir l'état, l'opération est conservée et tout nouvel
 achat est bloqué (`previousOutcome`/`posResolution` →
-`"unknown"`/`"blocked"`).
+`"unknown"`/`"blocked"`, liste blanche des statuts — toute valeur non
+reconnue est incertaine). Les flux « GET + décision » sont extraits
+(`checkPreviousOutcome` / `resolveStoredPending`, fetch injecté) pour
+être testés vitest sur les pannes réelles : erreur réseau, 5xx, corps
+JSON mal formé, statut non-string ou non reconnu.
 
 Billetterie web : la reprise rejoue le paiement sur **la même
 réservation** sans recréer de panier ni revalider le formulaire — qui
@@ -431,7 +435,7 @@ psql postgresql://postgres:password@localhost:5432/postgres \
   -c "CREATE DATABASE musee_test"
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/musee_test \
   alembic upgrade head
-pytest                       # 49 tests métier — isolation : transaction
+pytest                       # 114 tests métier — isolation : transaction
                              # rollbackée par test, jamais de seed nécessaire
 pytest --cov=app --cov-report=term-missing --cov-report=xml
                              # coverage (plancher 65 % — pyproject.toml)
@@ -440,8 +444,9 @@ pytest --cov=app --cov-report=term-missing --cov-report=xml
 npm run dev    # :3000
 npm run lint   # eslint
 npm test       # vitest — logique panier caisse (cart.test.ts) +
-               # reprise de paiement web (pending-payment.test.ts) +
-               # reprise d'encaissement POS (pos-pending.test.ts)
+               # reprise paiement web (pending-payment.test.ts : flux
+               # GET+décision sous panne injectée) + reprise POS
+               # (pos-pending.test.ts : idem au rechargement caisse)
 npm test -- --coverage   # + coverage v8 (plancher 80 %, vitest.config.ts)
 npx tsc --noEmit
 ```
@@ -477,10 +482,14 @@ concurrence réelle (threads + barrière, requêtes simultanées) :
 sur une même commande → 1 × 201 + 7 × 200, un seul `payment.id`, une
 seule transaction en base** ; **même clé sur deux réservations
 distinctes → 201 + 409, un seul encaissement** (l'index unique tranche
-la course que le FOR UPDATE ne sérialise pas). Seed idempotent,
-relançable à volonté.
+la course que le FOR UPDATE ne sérialise pas) ; **même clé, contenus
+différents en concurrence → 201 + 409, une seule empreinte honorée** ;
+**2 tranches ANCV concurrentes proches du solde → la seconde plafonnée
+au reste (excédent perdu, DFC n°7), total imputé exact** ; **4 tranches
+cash concurrentes à clés distinctes → 4 enregistrements, solde exact**.
+Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-09) : `backend/tests/` — 109 tests en
+**Suite métier pytest** (2026-10-09) : `backend/tests/` — 114 tests en
 ~25 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
@@ -760,10 +769,12 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   paramètres figés et nouvelle vente bloquée tant qu'une tranche est
   incertaine, restauration de la commande après rechargement ; reprise
   web `sessionStorage` sans recréer de panier (`pending-payment.ts`),
-  formulaire gelé, échec de vérification = blocage (jamais abandon).
-  109 tests pytest + rejeu E2E + concurrence démontrée ; vitest couvre
-  les décisions de contrôle du flux (reprendre/conclure/abandonner/
-  bloquer).
+  formulaire gelé, échec de vérification ou statut non reconnu =
+  blocage (jamais abandon). 114 tests pytest + rejeu E2E + concurrence
+  démontrée (7 scénarios) ; vitest (58 tests) couvre les décisions de
+  contrôle du flux **et** le flux « GET + décision » sous pannes
+  injectées (réseau, 5xx, JSON mal formé, statut non reconnu) —
+  composants React non testés (pas de harness), limites en §12.
 
 ### Backlog (feuille de route non figée)
 
@@ -815,6 +826,12 @@ Apple/Google Wallet).
 - La purge peut expirer un `pending` **partiellement payé** : les
   encaissements restent tracés mais la commande meurt — remboursement
   manuel (connu DFC n°7, à traiter avec la machine à états M4).
+- Pas de tests de **composants React** (pas de harness jsdom/testing-
+  library) : la répression des états incertains est prouvée au niveau
+  des décisions de flux extraites (`checkPreviousOutcome`,
+  `resolveStoredPending`, fetch injecté) — le câblage JSX (fieldset
+  disabled, bannière caisse, gardes `submitOrder`/`reset`) n'est pas
+  exercé automatiquement.
 - ESLint signale un artefact `coverage/block-navigation.js` généré
   par `vitest --coverage` local (warning, non bloquant, hors git).
 - Gotcha uvicorn : sous Windows, `--reload` crée une chaîne reloader →

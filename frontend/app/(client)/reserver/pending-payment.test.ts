@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  checkPreviousOutcome,
   clearPendingPayment,
   pendingAction,
   previousOutcome,
@@ -47,6 +48,25 @@ describe("pending-payment storage", () => {
         fakeStorage({ "musee:pending-payment": '{"amount":"5.00"}' })
       )
     ).toBeNull();
+  });
+
+  it("sessionStorage indisponible → lecture null, écriture ignorée", () => {
+    // Mode privé/quota : aucune donnée persistée, aucun crash — la
+    // reprise en mémoire suffit pour la session (comportement dégradé).
+    const broken = {
+      getItem: () => {
+        throw new DOMException("denied");
+      },
+      setItem: () => {
+        throw new DOMException("denied");
+      },
+      removeItem: () => {
+        throw new DOMException("denied");
+      },
+    };
+    expect(readPendingPayment(broken)).toBeNull();
+    expect(() => savePendingPayment(PENDING, broken)).not.toThrow();
+    expect(() => clearPendingPayment(broken)).not.toThrow();
   });
 });
 
@@ -95,4 +115,64 @@ describe("previousOutcome", () => {
       expect(previousOutcome(true, status)).toBe("unknown");
     }
   );
+});
+
+// Flux complet « GET + décision » avec fetch injecté : vérifie que les
+// pannes réelles (réseau, 5xx, corps mal formé) aboutissent à « unknown »
+// — la branche qui conserve l'opération et bloque tout nouvel achat.
+describe("checkPreviousOutcome (fetch injecté)", () => {
+  const API = "http://api.test";
+
+  const fetchOk =
+    (body: unknown): typeof fetch =>
+    async () =>
+      ({ ok: true, json: async () => body }) as Response;
+
+  it("GET 200 confirmé → conclude", async () => {
+    expect(
+      await checkPreviousOutcome(fetchOk({ status: "confirmed" }), API, PENDING)
+    ).toBe("conclude");
+  });
+
+  it("GET 200 pending → abandon", async () => {
+    expect(
+      await checkPreviousOutcome(fetchOk({ status: "pending" }), API, PENDING)
+    ).toBe("abandon");
+  });
+
+  it("GET 500 → unknown", async () => {
+    const f: typeof fetch = async () =>
+      ({ ok: false, json: async () => ({}) }) as Response;
+    expect(await checkPreviousOutcome(f, API, PENDING)).toBe("unknown");
+  });
+
+  it("erreur réseau (fetch jette) → unknown", async () => {
+    const f: typeof fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    expect(await checkPreviousOutcome(f, API, PENDING)).toBe("unknown");
+  });
+
+  it("corps JSON mal formé → unknown", async () => {
+    const f: typeof fetch = async () =>
+      ({
+        ok: true,
+        json: async () => {
+          throw new SyntaxError("Unexpected token");
+        },
+      }) as unknown as Response;
+    expect(await checkPreviousOutcome(f, API, PENDING)).toBe("unknown");
+  });
+
+  it("statut non-string (ex. nombre) → unknown", async () => {
+    expect(
+      await checkPreviousOutcome(fetchOk({ status: 42 }), API, PENDING)
+    ).toBe("unknown");
+  });
+
+  it("statut non reconnu → unknown", async () => {
+    expect(
+      await checkPreviousOutcome(fetchOk({ status: "processing" }), API, PENDING)
+    ).toBe("unknown");
+  });
 });

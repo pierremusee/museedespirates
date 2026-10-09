@@ -91,3 +91,31 @@ export function previousOutcome(
     return "abandon";
   return "unknown";
 }
+
+// Vérification d'une opération précédente (autre produit) : lecture
+// GET + décision. Extraite pour être testable avec un fetch injecté —
+// les effets de bord (storage, navigation) restent dans le composant.
+export async function checkPreviousOutcome(
+  apiFetch: typeof fetch,
+  apiUrl: string,
+  pending: PendingPayment
+): Promise<PreviousOutcome> {
+  let httpOk = false;
+  let status: string | null = null;
+  try {
+    const res = await apiFetch(
+      `${apiUrl}/reservations/${pending.reservationId}`,
+      { cache: "no-store" }
+    );
+    httpOk = res.ok;
+    if (res.ok) {
+      const body = (await res.json().catch(() => null)) as {
+        status?: unknown;
+      } | null;
+      status = typeof body?.status === "string" ? body.status : null;
+    }
+  } catch {
+    // Injoignable → unknown
+  }
+  return previousOutcome(httpOk, status);
+}

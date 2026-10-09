@@ -29,6 +29,7 @@ from app.models import (
     ProductComponent,
     ReservationStatus,
     SalesChannel,
+    Ticket,
 )
 from app.schemas.reservation import (
     PaymentCreate,
@@ -387,3 +388,135 @@ async def test_rejeu_web_confirme_memes_billets(db, catalog, today):
     assert replay.result == first.result
     assert await _payment_count(db, resa.id) == 1
     assert len(replay.result["tickets"]) == 1
+
+
+async def _ticket_count(db: AsyncSession, reservation_id) -> int:
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(Ticket)
+            .where(Ticket.reservation_id == reservation_id)
+        )
+    ).scalar_one()
+
+
+async def test_rejeu_ne_duplique_pas_les_billets_en_base(db, catalog, today):
+    # Le snapshot rejoué ne réémet rien : le nombre de billets en base
+    # reste celui de l'opération initiale.
+    resa = await create_reservation(
+        db, order(item("museum_entry", category="adult", visit_date=today))
+    )
+    key = uuid.uuid4()
+    await add_payment(db, resa.id, pay("12.00", key=key))
+    assert await _ticket_count(db, resa.id) == 1
+
+    replay = await add_payment(db, resa.id, pay("12.00", key=key))
+    assert replay.replayed
+    assert await _ticket_count(db, resa.id) == 1
+
+
+async def test_snapshot_persiste_et_rejoue_apres_relecture(db, catalog):
+    # Redémarrage simulé : invalidation du cache d'identité SQLAlchemy,
+    # puis rejeu — la réponse provient de la colonne JSONB persistée,
+    # pas d'un état en mémoire.
+    resa = await pending_simple(db, channel=SalesChannel.POS)
+    key = uuid.uuid4()
+    first = await add_payment(
+        db, resa.id, pay("5.00", PaymentMethod.CASH, key=key)
+    )
+    pid = first.payment.id
+    rid = resa.id  # capturé avant expiration (lazy-load interdit)
+    db.expire_all()  # tout l'état ORM en mémoire est invalidé
+
+    stored = (
+        await db.execute(
+            select(PaymentTransaction.response).where(
+                PaymentTransaction.id == pid
+            )
+        )
+    ).scalar_one()
+    assert stored == first.result  # snapshot réellement en base
+
+    replay = await add_payment(
+        db, rid, pay("5.00", PaymentMethod.CASH, key=key)
+    )
+    assert replay.replayed
+    assert replay.result == first.result
+
+
+async def test_rejeu_apres_expiration_restitue_snapshot(db, catalog):
+    # Même garantie qu'après annulation : la purge TTL a pu expirer la
+    # commande entre-temps, le rejeu restitue la réponse initiale.
+    resa = await pending_simple(db, channel=SalesChannel.POS)
+    key = uuid.uuid4()
+    first = await add_payment(
+        db, resa.id, pay("5.00", PaymentMethod.CASH, key=key)
+    )
+    resa.status = ReservationStatus.EXPIRED
+    await db.flush()
+    replay = await add_payment(
+        db, resa.id, pay("5.00", PaymentMethod.CASH, key=key)
+    )
+    assert replay.replayed
+    assert replay.result == first.result
+    assert replay.result["reservation_status"] == "pending"
+    assert replay.reservation.status == ReservationStatus.EXPIRED
+
+
+async def test_encaissement_reste_trace_apres_annulation(db, catalog):
+    # Scénario guichet : espèces remises, réponse perdue, commande
+    # annulée entre-temps. La transaction enregistrée n'est jamais
+    # effacée — la traçabilité permet le remboursement manuel.
+    resa = await pending_simple(db, channel=SalesChannel.POS)
+    key = uuid.uuid4()
+    await add_payment(db, resa.id, pay("5.00", PaymentMethod.CASH, key=key))
+    await cancel_reservation(db, resa.id)
+    await db.refresh(resa)
+    assert resa.status == ReservationStatus.CANCELLED
+    assert await _payment_count(db, resa.id) == 1
+    applied = (
+        await db.execute(
+            select(func.sum(PaymentTransaction.applied_amount)).where(
+                PaymentTransaction.reservation_id == resa.id
+            )
+        )
+    ).scalar_one()
+    assert applied == Decimal("5.00")
+
+
+async def test_echec_emission_ne_laisse_aucun_etat_partiel(db, catalog):
+    # Échec pendant la transaction (409 émission, séance supprimée) :
+    # rollback complet — ni paiement, ni billet, ni statut modifié, et
+    # la clé n'est pas consommée (un rejeu retombe sur le même 409
+    # métier, pas sur un snapshot fantôme).
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="adult",
+                session_id=catalog.session.id,
+            )
+        ),
+    )
+    await db.delete(catalog.session)
+    await db.flush()
+    key = uuid.uuid4()
+    with pytest.raises(HTTPException) as e:
+        await add_payment(db, resa.id, pay("10.00", key=key))
+    assert e.value.status_code == 409
+
+    await db.rollback()  # ce que fait la frontière HTTP en fin de requête
+    await db.refresh(resa)
+    assert await _payment_count(db, resa.id) == 0
+    assert await _ticket_count(db, resa.id) == 0
+    assert resa.status == ReservationStatus.PENDING
+
+    # Le rollback a aussi restauré la séance supprimée : on la retire à
+    # nouveau, puis le même appel avec la même clé retombe sur le 409
+    # métier — la clé n'a pas été consommée par l'échec précédent.
+    await db.delete(catalog.session)
+    await db.flush()
+    with pytest.raises(HTTPException) as e2:
+        await add_payment(db, resa.id, pay("10.00", key=key))
+    assert e2.value.status_code == 409
+    await db.rollback()

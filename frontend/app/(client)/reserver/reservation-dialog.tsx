@@ -19,9 +19,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
+  checkPreviousOutcome,
   clearPendingPayment,
   pendingAction,
-  previousOutcome,
   readPendingPayment,
   savePendingPayment,
   type PendingPayment,
@@ -260,20 +260,11 @@ export function ReservationDialog({
         // son issue avant de l'écraser. Confirmée → le paiement avait
         // abouti, on conclut sur cette commande ; sinon la purge TTL
         // restituera sa jauge et la nouvelle opération démarre libre.
-        let httpOk = false;
-        let prevStatus: string | null = null;
-        try {
-          const chk = await fetch(
-            `${api}/reservations/${pending.reservationId}`,
-            { cache: "no-store" }
-          );
-          httpOk = chk.ok;
-          if (chk.ok)
-            prevStatus = (await chk.json()).status ?? null;
-        } catch {
-          // Injoignable → état inconnu, traité ci-dessous.
-        }
-        const outcome = previousOutcome(httpOk, prevStatus);
+        const outcome = await checkPreviousOutcome(
+          fetch,
+          api ?? "",
+          pending
+        );
         if (outcome === "conclude") {
           pendingRef.current = null;
           setPendingUI(null);

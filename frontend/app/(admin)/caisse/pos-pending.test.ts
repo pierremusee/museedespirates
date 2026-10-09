@@ -10,6 +10,7 @@ import {
   clearPosPending,
   posResolution,
   readPosPending,
+  resolveStoredPending,
   savePosPending,
   type PosPendingPayment,
 } from "./pos-pending";
@@ -50,6 +51,23 @@ describe("pos-pending storage", () => {
       )
     ).toBeNull();
   });
+
+  it("sessionStorage indisponible → lecture null, écriture ignorée", () => {
+    const broken = {
+      getItem: () => {
+        throw new DOMException("denied");
+      },
+      setItem: () => {
+        throw new DOMException("denied");
+      },
+      removeItem: () => {
+        throw new DOMException("denied");
+      },
+    };
+    expect(readPosPending(broken)).toBeNull();
+    expect(() => savePosPending(PENDING, broken)).not.toThrow();
+    expect(() => clearPosPending(broken)).not.toThrow();
+  });
 });
 
 describe("posResolution", () => {
@@ -88,4 +106,83 @@ describe("posResolution", () => {
       expect(posResolution(true, status)).toBe("blocked");
     }
   );
+});
+
+// Flux complet « GET + décision » au rechargement avec fetch injecté :
+// vérifie que les pannes réelles aboutissent à « blocked » — la caisse
+// reste figée, l'opération persistée n'est jamais supprimée.
+describe("resolveStoredPending (fetch injecté)", () => {
+  const API = "http://api.test";
+
+  const fetchOk =
+    (body: unknown): typeof fetch =>
+    async () =>
+      ({ ok: true, json: async () => body }) as Response;
+
+  it("GET 200 pending → resume + détail restitué", async () => {
+    const r = await resolveStoredPending(
+      fetchOk({ status: "pending", payments: [] }),
+      API,
+      PENDING
+    );
+    expect(r.action).toBe("resume");
+    expect(r.detail?.status).toBe("pending");
+  });
+
+  it("GET 200 confirmed → conclude", async () => {
+    const r = await resolveStoredPending(
+      fetchOk({ status: "confirmed" }),
+      API,
+      PENDING
+    );
+    expect(r.action).toBe("conclude");
+  });
+
+  it("GET 500 → blocked", async () => {
+    const f: typeof fetch = async () =>
+      ({ ok: false, json: async () => ({}) }) as Response;
+    const r = await resolveStoredPending(f, API, PENDING);
+    expect(r.action).toBe("blocked");
+    expect(r.detail).toBeNull();
+  });
+
+  it("erreur réseau (fetch jette) → blocked", async () => {
+    const f: typeof fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    expect((await resolveStoredPending(f, API, PENDING)).action).toBe(
+      "blocked"
+    );
+  });
+
+  it("corps JSON mal formé → blocked", async () => {
+    const f: typeof fetch = async () =>
+      ({
+        ok: true,
+        json: async () => {
+          throw new SyntaxError("Unexpected token");
+        },
+      }) as unknown as Response;
+    expect((await resolveStoredPending(f, API, PENDING)).action).toBe(
+      "blocked"
+    );
+  });
+
+  it("statut non-string (ex. nombre) → blocked", async () => {
+    const r = await resolveStoredPending(
+      fetchOk({ status: 42 }),
+      API,
+      PENDING
+    );
+    expect(r.action).toBe("blocked");
+  });
+
+  it("statut non reconnu → blocked", async () => {
+    const r = await resolveStoredPending(
+      fetchOk({ status: "processing" }),
+      API,
+      PENDING
+    );
+    expect(r.action).toBe("blocked");
+  });
 });

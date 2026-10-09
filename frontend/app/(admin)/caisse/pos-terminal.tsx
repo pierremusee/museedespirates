@@ -56,8 +56,8 @@ import {
 } from "./cart";
 import {
   clearPosPending,
-  posResolution,
   readPosPending,
+  resolveStoredPending,
   savePosPending,
   type PosPendingPayment,
 } from "./pos-pending";
@@ -237,19 +237,12 @@ export function PosTerminal({
     const stored = readPosPending(sessionStorage);
     if (!stored) return;
     void (async () => {
-      let httpOk = false;
-      let detail: ReservationDetail | null = null;
-      try {
-        const chk = await fetch(
-          `${API}/reservations/${stored.reservationId}`,
-          { cache: "no-store" }
-        );
-        httpOk = chk.ok;
-        if (chk.ok) detail = await chk.json();
-      } catch {
-        // Injoignable → "blocked" ci-dessous.
-      }
-      const action = posResolution(httpOk, detail?.status ?? null);
+      const { action, detail: rawDetail } = await resolveStoredPending(
+        fetch,
+        API ?? "",
+        stored
+      );
+      const detail = rawDetail as ReservationDetail | null;
       if (action === "blocked") {
         setRestoreBlocked(stored);
         toast.error(
