@@ -538,7 +538,11 @@ hors de toute `SeasonalPeriod` existante et hors de la fenêtre « HS test »
 (reproductible toute l'année, y compris en juillet-août). Les séances
 « du jour » du seed sont bornées au jour civil Paris (`session_today`) :
 `now±Xh` pouvait basculer sur le jour voisin entre 23h et 0h20 locales,
-rendant la séance invendable/non scannable.
+rendant la séance invendable/non scannable. Même base pour les jours
+de référence `today`/`yesterday`/`tomorrow` des deux scripts et les
+`visit_date` de `test_concurrency.py` : `date.today()` du runner UTC
+divergeait du jour civil Paris entre 0h et 2h (heure d'été) — les
+billets « aujourd'hui » arrivaient datés de la veille (flake CI).
 
 `test_concurrency.py` (M1 + idempotence 2026-10-09) démontre sous
 concurrence réelle (threads + barrière, requêtes simultanées) :
