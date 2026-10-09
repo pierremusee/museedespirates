@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CalendarClock, Loader2, Minus, Plus, Ticket } from "lucide-react";
 import { toast } from "sonner";
@@ -122,6 +122,19 @@ export function ReservationDialog({
   // Paiement à l'issue incertaine en attente (même réservation, même
   // clé d'idempotence) — miroir de sessionStorage, cf pending-payment.ts.
   const pendingRef = useRef<PendingPayment | null>(null);
+  // Opération incertaine affichée : tant qu'elle existe pour CE produit,
+  // le formulaire est figé — l'estimation ne doit pas se substituer au
+  // montant réellement engagé. Chargée à l'ouverture (sessionStorage
+  // est indisponible côté serveur).
+  const [pendingUI, setPendingUI] = useState<PendingPayment | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const p = pendingRef.current ?? readPendingPayment(sessionStorage);
+    setPendingUI(
+      p && pendingAction(p, product.code) === "resume" ? p : null
+    );
+  }, [open, product.code]);
 
   const isFamily = product.kind === "family";
   const needsSessions = sessionCount > 0;
@@ -196,31 +209,40 @@ export function ReservationDialog({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (submitInFlight.current) return;
-    if (needsSessions && selectedSessions.length !== sessionCount) {
-      toast.error(
-        `Sélectionnez ${sessionCount} séance${sessionCount > 1 ? "s" : ""}.`
-      );
-      return;
-    }
-    if (persons === 0) {
-      toast.error("Sélectionnez au moins un billet.");
-      return;
-    }
-    if (needsSessions && persons > capacity) {
-      toast.error("Pas assez de places disponibles sur cette séance.");
-      return;
-    }
-    if (extraSessionId === "") {
-      toast.error("Choisissez la séance supplémentaire.");
-      return;
-    }
-    if (extraSessionId) {
-      const extra = sessions.find((s) => s.id === extraSessionId);
-      if (!extra || extra.remaining < persons) {
+    // Opération à l'issue incertaine persistée (mémoire, puis
+    // sessionStorage pour survivre au rechargement) — lue AVANT les
+    // validations : la reprise rejoue le paiement de la réservation
+    // existante, les paramètres du panier ne sont pas revalidés.
+    const stored = pendingRef.current ?? readPendingPayment(sessionStorage);
+    const resuming =
+      stored !== null && pendingAction(stored, product.code) === "resume";
+    if (!resuming) {
+      if (needsSessions && selectedSessions.length !== sessionCount) {
         toast.error(
-          "Pas assez de places disponibles sur la séance supplémentaire."
+          `Sélectionnez ${sessionCount} séance${sessionCount > 1 ? "s" : ""}.`
         );
         return;
+      }
+      if (persons === 0) {
+        toast.error("Sélectionnez au moins un billet.");
+        return;
+      }
+      if (needsSessions && persons > capacity) {
+        toast.error("Pas assez de places disponibles sur cette séance.");
+        return;
+      }
+      if (extraSessionId === "") {
+        toast.error("Choisissez la séance supplémentaire.");
+        return;
+      }
+      if (extraSessionId) {
+        const extra = sessions.find((s) => s.id === extraSessionId);
+        if (!extra || extra.remaining < persons) {
+          toast.error(
+            "Pas assez de places disponibles sur la séance supplémentaire."
+          );
+          return;
+        }
       }
     }
 
@@ -228,10 +250,7 @@ export function ReservationDialog({
     submitInFlight.current = true;
     try {
       const api = process.env.NEXT_PUBLIC_API_URL;
-      // Opération à l'issue incertaine persistée (mémoire, puis
-      // sessionStorage pour survivre au rechargement de page).
-      let pending =
-        pendingRef.current ?? readPendingPayment(sessionStorage);
+      let pending = stored;
 
       if (
         pending &&
@@ -241,30 +260,46 @@ export function ReservationDialog({
         // son issue avant de l'écraser. Confirmée → le paiement avait
         // abouti, on conclut sur cette commande ; sinon la purge TTL
         // restituera sa jauge et la nouvelle opération démarre libre.
+        let httpOk = false;
         let prevStatus: string | null = null;
         try {
           const chk = await fetch(
             `${api}/reservations/${pending.reservationId}`,
             { cache: "no-store" }
           );
-          if (chk.ok) prevStatus = (await chk.json()).status;
+          httpOk = chk.ok;
+          if (chk.ok)
+            prevStatus = (await chk.json()).status ?? null;
         } catch {
-          prevStatus = null; // injoignable → abandon
+          // Injoignable → état inconnu, traité ci-dessous.
         }
-        if (previousOutcome(prevStatus) === "conclude") {
+        const outcome = previousOutcome(httpOk, prevStatus);
+        if (outcome === "conclude") {
           pendingRef.current = null;
+          setPendingUI(null);
           clearPendingPayment(sessionStorage);
           setOpen(false);
           router.push(`/succes?id=${pending.reservationId}`);
           return;
         }
+        if (outcome === "unknown") {
+          // L'échec de lecture ne prouve rien sur le sort du paiement :
+          // la clé est conservée et tout nouvel achat est bloqué
+          // jusqu'à ce que l'état de l'opération soit établi.
+          pendingRef.current = pending;
+          toast.error(
+            "Impossible de vérifier le paiement en cours — aucune nouvelle commande n'a été créée. Réessayez."
+          );
+          return;
+        }
         pending = null;
         pendingRef.current = null;
+        setPendingUI(null);
         clearPendingPayment(sessionStorage);
       }
 
-      // Reprise : même réservation, même clé — jamais de second panier.
-      const resuming = pending !== null;
+      // `resuming` (défini en tête de fonction) : même réservation,
+      // même clé — jamais de second panier.
       let reservationId = pending?.reservationId ?? "";
       let reservationTotal = pending?.amount ?? "0";
 
@@ -373,6 +408,7 @@ export function ReservationDialog({
           amount: reservation.total_price,
         };
         pendingRef.current = pending;
+        setPendingUI(pending);
         savePendingPayment(pending, sessionStorage);
       }
       }
@@ -425,9 +461,11 @@ export function ReservationDialog({
             if (payable) {
               pending.paymentKey = null;
               pendingRef.current = pending;
+              setPendingUI(pending);
               savePendingPayment(pending, sessionStorage);
             } else {
               pendingRef.current = null;
+              setPendingUI(null);
               clearPendingPayment(sessionStorage);
             }
             toast.error(body.detail ?? "Le paiement par carte a échoué.");
@@ -439,6 +477,7 @@ export function ReservationDialog({
       }
 
       pendingRef.current = null;
+      setPendingUI(null);
       clearPendingPayment(sessionStorage);
       toast.success(
         estimate === 0
@@ -516,6 +555,24 @@ export function ReservationDialog({
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-5">
+          {pendingUI && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-700 dark:bg-amber-950/40">
+              <p className="font-medium">
+                Paiement en attente :{" "}
+                {eurFormatter.format(Number(pendingUI.amount))} par CB
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Le résultat de l&apos;opération précédente est incertain —
+                la commande est figée, reprenez le paiement ci-dessous.
+              </p>
+            </div>
+          )}
+          {/* Tant qu'une opération est incertaine, ses paramètres sont
+              figés : le fieldset désactive tous les contrôles du panier. */}
+          <fieldset
+            disabled={pendingUI !== null}
+            className="m-0 min-w-0 space-y-5 border-0 p-0 disabled:opacity-70"
+          >
           {needsSessions && (
             <div className="space-y-2">
               <Label>
@@ -674,10 +731,16 @@ export function ReservationDialog({
 
           <div className="flex items-center justify-between rounded-lg border bg-muted/40 px-4 py-3">
             <span className="text-sm font-medium">
-              {estimate === 0 ? "Gratuit — aucun paiement requis" : "Total estimé"}
+              {pendingUI
+                ? "Montant de l'opération en attente"
+                : estimate === 0
+                  ? "Gratuit — aucun paiement requis"
+                  : "Total estimé"}
             </span>
             <span className="text-lg font-bold tabular-nums">
-              {eurFormatter.format(estimate)}
+              {eurFormatter.format(
+                pendingUI ? Number(pendingUI.amount) : estimate
+              )}
             </span>
           </div>
 
@@ -685,21 +748,26 @@ export function ReservationDialog({
             * Tarif réduit et gratuités : justificatif exigé au contrôle
             d&apos;accès.
           </p>
+          </fieldset>
 
           <DialogFooter>
             <Button
               type="submit"
               disabled={
                 submitting ||
-                persons === 0 ||
-                extraSessionId === "" ||
-                (needsSessions && selectedSessions.length !== sessionCount)
+                (!pendingUI &&
+                  (persons === 0 ||
+                    extraSessionId === "" ||
+                    (needsSessions &&
+                      selectedSessions.length !== sessionCount)))
               }
             >
               {submitting && <Loader2 className="size-4 animate-spin" />}
-              {estimate === 0
-                ? `Valider — ${persons} entrée${persons > 1 ? "s" : ""} gratuite${persons > 1 ? "s" : ""}`
-                : `Payer ${eurFormatter.format(estimate)} par CB`}
+              {pendingUI
+                ? `Reprendre le paiement de ${eurFormatter.format(Number(pendingUI.amount))}`
+                : estimate === 0
+                  ? `Valider — ${persons} entrée${persons > 1 ? "s" : ""} gratuite${persons > 1 ? "s" : ""}`
+                  : `Payer ${eurFormatter.format(estimate)} par CB`}
             </Button>
           </DialogFooter>
         </form>

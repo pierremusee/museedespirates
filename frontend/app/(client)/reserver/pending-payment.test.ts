@@ -66,13 +66,24 @@ describe("pendingAction", () => {
 
 describe("previousOutcome", () => {
   it("confirmée → conclude (le paiement avait abouti)", () => {
-    expect(previousOutcome("confirmed")).toBe("conclude");
+    expect(previousOutcome(true, "confirmed")).toBe("conclude");
   });
 
-  it.each(["pending", "cancelled", "expired", null])(
-    "%s → abandon (nouvelle opération libre)",
+  it.each(["pending", "cancelled", "expired"])(
+    "%s → abandon (commande morte, nouvelle opération libre)",
     (status) => {
-      expect(previousOutcome(status)).toBe("abandon");
+      expect(previousOutcome(true, status)).toBe("abandon");
     }
   );
+
+  it("GET en échec (réseau, 4xx, 5xx) → unknown, opération conservée", () => {
+    // Une erreur de lecture ne prouve pas l'échec du paiement :
+    // l'opération reste incertaine et bloque tout nouvel achat.
+    expect(previousOutcome(false, null)).toBe("unknown");
+    expect(previousOutcome(false, "pending")).toBe("unknown");
+  });
+
+  it("réponse OK sans statut → unknown (état non établi)", () => {
+    expect(previousOutcome(true, null)).toBe("unknown");
+  });
 });

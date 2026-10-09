@@ -1,0 +1,81 @@
+// Cycle de vie de la reprise d'encaissement POS (pos-pending.ts) :
+// persistance sessionStorage et décision de résolution après GET.
+// Les décisions de contrôle du flux sont testées directement — elles
+// portent les garanties « jamais de clé perdue, jamais de nouvelle
+// vente silencieuse ».
+
+import { describe, expect, it } from "vitest";
+
+import {
+  clearPosPending,
+  posResolution,
+  readPosPending,
+  savePosPending,
+  type PosPendingPayment,
+} from "./pos-pending";
+
+function fakeStorage(initial: Record<string, string> = {}) {
+  const map = new Map(Object.entries(initial));
+  return {
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => void map.set(k, v),
+    removeItem: (k: string) => void map.delete(k),
+  };
+}
+
+const PENDING: PosPendingPayment = {
+  reservationId: "resa-9",
+  key: "key-9",
+  method: "cash",
+  amount: "5.00",
+};
+
+describe("pos-pending storage", () => {
+  it("roundtrip écriture/lecture/nettoyage", () => {
+    const s = fakeStorage();
+    expect(readPosPending(s)).toBeNull();
+    savePosPending(PENDING, s);
+    expect(readPosPending(s)).toEqual(PENDING);
+    clearPosPending(s);
+    expect(readPosPending(s)).toBeNull();
+  });
+
+  it("JSON corrompu ou incomplet → null", () => {
+    expect(
+      readPosPending(fakeStorage({ "musee:pos-pending-payment": "{oops" }))
+    ).toBeNull();
+    expect(
+      readPosPending(
+        fakeStorage({ "musee:pos-pending-payment": '{"amount":"5.00"}' })
+      )
+    ).toBeNull();
+  });
+});
+
+describe("posResolution", () => {
+  it("commande pending → resume : même clé, mêmes paramètres", () => {
+    expect(posResolution(true, "pending")).toBe("resume");
+  });
+
+  it("commande confirmée → conclude : le paiement avait abouti", () => {
+    expect(posResolution(true, "confirmed")).toBe("conclude");
+  });
+
+  it.each(["cancelled", "expired"])(
+    "commande %s → abandon : commande morte, clé libérable",
+    (status) => {
+      expect(posResolution(true, status)).toBe("abandon");
+    }
+  );
+
+  it("GET en échec (réseau, 4xx, 5xx) → blocked : rien n'est décidé", () => {
+    // Un échec de lecture ne prouve pas l'échec de l'encaissement :
+    // la caisse reste figée, aucune nouvelle vente silencieuse.
+    expect(posResolution(false, null)).toBe("blocked");
+    expect(posResolution(false, "pending")).toBe("blocked");
+  });
+
+  it("réponse OK sans statut → blocked (état non établi)", () => {
+    expect(posResolution(true, null)).toBe("blocked");
+  });
+});

@@ -284,14 +284,32 @@ même clé sur 2 réservations → 201 + 409).
 **Cycle de vie client** : clé `crypto.randomUUID()` créée au
 déclenchement d'une nouvelle opération, conservée tant que l'issue est
 incertaine (réseau, timeout, 5xx), libérée après succès ou rejet 4xx
-certain. Caisse : verrou synchrone `paymentInFlight` (ref — le state
-`busy` laisse passer un double clic dans le même batch React).
-Billetterie web : l'opération en attente (réservation + clé + montant,
-rien de sensible) est persistée en `sessionStorage`
-(`pending-payment.ts`, testé vitest) — la reprise rejoue le paiement
-sur **la même réservation** sans recréer de panier ; une opération en
-attente sur un autre produit est résolue par `GET /reservations/{id}`
-avant écrasement (confirmée → `/succes`, sinon abandonnée à la purge).
+certain. Sur les **deux** canaux, l'opération en attente (réservation +
+clé + moyen + montant, rien de sensible) est persistée en
+`sessionStorage` (`pending-payment.ts` / `pos-pending.ts`, testés
+vitest) et les paramètres de l'opération sont **figés** tant qu'elle
+n'est pas résolue. Règle cardinale : **un échec de lecture n'est jamais
+assimilé à un abandon** — si `GET /reservations/{id}` échoue ou ne
+permet pas d'établir l'état, l'opération est conservée et tout nouvel
+achat est bloqué (`previousOutcome`/`posResolution` →
+`"unknown"`/`"blocked"`).
+
+Billetterie web : la reprise rejoue le paiement sur **la même
+réservation** sans recréer de panier ni revalider le formulaire — qui
+est gelé (`fieldset disabled`) avec le montant réel de l'opération, pas
+l'estimation. Une opération en attente sur un autre produit est résolue
+par `GET /reservations/{id}` avant écrasement (confirmée → `/succes`,
+commande morte → abandonnée à la purge, indéterminée → blocage).
+
+Caisse : verrou synchrone `paymentInFlight` (ref — le state `busy`
+laisse passer un double clic dans le même batch React) ; tant qu'une
+tranche est incertaine, moyen/montant figés, « Modifier la commande »,
+« Nouvelle vente » et `submitOrder` bloqués, bouton « Réessayer
+l'encaissement ». Au rechargement, la commande est restaurée via GET
+(`pending` → reprise même clé ; `confirmed` → commande restaurée avec
+billets ; annulée/expirée → clé libérée, encaissements éventuels
+signalés pour remboursement manuel ; état indéterminé → caisse bloquée
+avec bouton « Revérifier »).
 
 ### Groupes
 
@@ -361,10 +379,10 @@ serveur (`cache: "no-store"`) sur `NEXT_PUBLIC_API_URL`.
 | `/` | `app/page.tsx` | Accueil « Musée des Pirates » + CTA réservation. |
 | `/reserver` | `(client)/reserver/page.tsx` | Server Component : catalogue produits en cartes, séances du jour, badge haute saison, sold-out. `?date=` pilote le jour. |
 | | `date-picker.tsx` | Calendrier shadcn + popover + date-fns (fr) → pousse `?date=`. |
-| | `reservation-dialog.tsx` | Client : compteurs par tarif + profils gratuits, choix de séance(s), séance supplémentaire `extra_show` fusionnée, estimation live (re-calculée serveur), POST reservation + paiement CB simulé **idempotent** (`idempotency_key`, reprise `sessionStorage` via `pending-payment.ts`), redirect `/succes`. |
+| | `reservation-dialog.tsx` | Client : compteurs par tarif + profils gratuits, choix de séance(s), séance supplémentaire `extra_show` fusionnée, estimation live (re-calculée serveur), POST reservation + paiement CB simulé **idempotent** (`idempotency_key`, reprise `sessionStorage` via `pending-payment.ts`, formulaire figé tant qu'une opération est incertaine — échec de vérification = blocage, jamais abandon), redirect `/succes`. |
 | `/succes` | `(client)/succes/page.tsx` | Confirmation : lignes, total, référence, puis **cartes-billets** (`TicketCard`) + bouton « Imprimer les billets ». |
 | `/scanner` | `(admin)/scanner/page.tsx` | Client : sélecteur de poste (entrée musée / séances du jour), `@yudiel/react-qr-scanner`, verdict vert/rouge, warning justificatif, droits restants. |
-| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` + `cart.ts` | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), composition miroir à l'ajout (uniquement des droits non encore couverts — `copiableCounts`), **optimisation automatique « Pass 1 Spectacle »** quand musée + séance à composition strictement identique coexistent (`strictPassHint` → lignes consommées supprimées, badge « Optimisé », toast d'économie ; cas partiels/ambigus = suggestion explicite `passSuggestion`), absorption des lignes simples au clic direct sur le Pass, séance supplémentaire par ligne (`addExtraShow`), multi-paiements **idempotents** avec rendu (clé par tranche, verrou synchrone anti double-clic, reprise après issue incertaine), annulation « Modifier la commande », émission/impression des cartes-billets. Logique panier extraite dans `cart.ts` (purs fonctions, testées par `cart.test.ts` — vitest). |
+| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` + `cart.ts` | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), composition miroir à l'ajout (uniquement des droits non encore couverts — `copiableCounts`), **optimisation automatique « Pass 1 Spectacle »** quand musée + séance à composition strictement identique coexistent (`strictPassHint` → lignes consommées supprimées, badge « Optimisé », toast d'économie ; cas partiels/ambigus = suggestion explicite `passSuggestion`), absorption des lignes simples au clic direct sur le Pass, séance supplémentaire par ligne (`addExtraShow`), multi-paiements **idempotents** avec rendu (clé par tranche persistée `sessionStorage` via `pos-pending.ts`, verrou synchrone anti double-clic, paramètres figés + blocage nouvelle vente tant qu'une tranche est incertaine, restauration de la commande après rechargement via GET), annulation « Modifier la commande », émission/impression des cartes-billets. Logique panier extraite dans `cart.ts` (purs fonctions, testées par `cart.test.ts` — vitest). |
 
 **Billet carte (CR80, 85,6 × 54 mm)** — composant partagé
 `components/ticket-card.tsx` : QR (`ticket-qr.tsx`, ~23 mm, jeton =
@@ -422,7 +440,8 @@ pytest --cov=app --cov-report=term-missing --cov-report=xml
 npm run dev    # :3000
 npm run lint   # eslint
 npm test       # vitest — logique panier caisse (cart.test.ts) +
-               # reprise de paiement web (pending-payment.test.ts)
+               # reprise de paiement web (pending-payment.test.ts) +
+               # reprise d'encaissement POS (pos-pending.test.ts)
 npm test -- --coverage   # + coverage v8 (plancher 80 %, vitest.config.ts)
 npx tsc --noEmit
 ```
@@ -737,9 +756,14 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   (cas découvert et corrigé via `test_concurrency.py`). Filet
   `IntegrityError` → rollback → relecture → rejeu/409 pour la course
   inter-réservations. Front : verrou synchrone caisse + cycle de vie
-  de clé par tranche, reprise web `sessionStorage` sans recréer de
-  panier (`pending-payment.ts`). 109 tests pytest + rejeu E2E +
-  concurrence démontrée.
+  de clé par tranche persisté `sessionStorage` (`pos-pending.ts`),
+  paramètres figés et nouvelle vente bloquée tant qu'une tranche est
+  incertaine, restauration de la commande après rechargement ; reprise
+  web `sessionStorage` sans recréer de panier (`pending-payment.ts`),
+  formulaire gelé, échec de vérification = blocage (jamais abandon).
+  109 tests pytest + rejeu E2E + concurrence démontrée ; vitest couvre
+  les décisions de contrôle du flux (reprendre/conclure/abandonner/
+  bloquer).
 
 ### Backlog (feuille de route non figée)
 

@@ -72,13 +72,19 @@ export function pendingAction(
 }
 
 // Après GET /reservations/{id} de l'ancienne opération (autre produit).
-export type PreviousOutcome = "conclude" | "abandon";
+export type PreviousOutcome =
+  | "conclude" // confirmée : le paiement avait abouti
+  | "abandon" // pending/cancelled/expired : commande morte, clé libérable
+  | "unknown"; // lecture impossible : état non établi, ne rien décider
 
 export function previousOutcome(
+  httpOk: boolean,
   status: string | null
 ): PreviousOutcome {
-  // Confirmée : le paiement avait abouti — conclure sur cette commande.
-  // pending/cancelled/expired/injoignable : abandonner, la purge TTL
-  // restituera la jauge ; la nouvelle opération peut démarrer.
-  return status === "confirmed" ? "conclude" : "abandon";
+  // Un échec de lecture (réseau, 4xx/5xx, corps sans statut) ne prouve
+  // rien sur le sort du paiement : l'opération reste incertaine et
+  // doit être conservée — jamais assimilée à un abandon.
+  if (!httpOk || status === null) return "unknown";
+  if (status === "confirmed") return "conclude";
+  return "abandon";
 }
