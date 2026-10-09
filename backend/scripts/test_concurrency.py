@@ -68,6 +68,15 @@ def post(url: str, payload: dict) -> tuple[int, dict]:
         return e.code, json.loads(e.read().decode() or "{}")
 
 
+def get(url: str) -> tuple[int, dict | list]:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        resp = urllib.request.urlopen(req)
+        return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode() or "{}")
+
+
 async def seed() -> dict:
     engine = create_async_engine(settings.DATABASE_URL)
     maker = async_sessionmaker(
@@ -259,7 +268,8 @@ async def main() -> None:
     assert s == 201
     s, pay_result = post(
         f"{BASE_URL}/reservations/{resa['id']}/payments",
-        {"method": "cb", "amount": resa["total_price"]},
+        {"method": "cb", "amount": resa["total_price"],
+         "idempotency_key": str(uuid.uuid4())},
     )
     assert s == 201 and pay_result["reservation_status"] == "confirmed"
     ticket_id = pay_result["tickets"][0]["id"]
@@ -279,7 +289,88 @@ async def main() -> None:
         f"rejets inattendus : {sorted(set(scan_rejects))}"
     print("=> OK : 1 seul scan accepté sur M concurrents")
 
-    print("\nM1 — concurrence démontrée : anti-surbooking + anti double-scan.")
+    # --- 3. Paiements concurrents, même clé d'idempotence --------------
+    # Double-clic/retry côté client : M requêtes identiques portant la
+    # même clé sur la même commande — exactement une exécution.
+    print(f"\nPaiement concurrent : {M} requêtes, même clé d'idempotence")
+    s, resa_p = post(f"{BASE_URL}/reservations", {
+        "customer_email": "payconcurrent@test.fr",
+        "items": [{
+            "product_code": "concurrency_museum",
+            "category": "adult",
+            "visit_date": str(date.today()),
+        }],
+    })
+    assert s == 201
+    pay_key = str(uuid.uuid4())
+
+    def try_pay(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_p['id']}/payments",
+            {"method": "cb", "amount": resa_p["total_price"],
+             "idempotency_key": pay_key},
+        )
+
+    pays = concurrent(M, try_pay)
+    statuses = [s for s, _ in pays]
+    created = sum(1 for s in statuses if s == 201)
+    replays = sum(1 for s in statuses if s == 200)
+    payment_ids = {b["payment"]["id"] for _, b in pays}
+    print(f"Résultats : {created} × 201, {replays} × 200, "
+          f"payment ids distincts = {len(payment_ids)}")
+    assert created == 1, f"{created} créations au lieu de 1"
+    assert created + replays == M, f"statuts inattendus : {statuses}"
+    assert len(payment_ids) == 1, "transactions dupliquées sous la même clé"
+
+    s, detail = get(f"{BASE_URL}/reservations/{resa_p['id']}")
+    assert s == 200 and len(detail["payments"]) == 1
+    assert detail["status"] == "confirmed" and len(detail["tickets"]) == 1
+    print("=> OK : 1 transaction, 1 confirmation, 1 billet")
+
+    # --- 4. Course de clé entre deux réservations différentes ----------
+    # La même clé visant deux commandes : le FOR UPDATE ne les
+    # sérialise pas — l'index unique tranche, le perdant obtient 409.
+    print("\nCourse de clé : même clé sur deux réservations distinctes")
+    resa_ids = []
+    for i in range(2):
+        s, r = post(f"{BASE_URL}/reservations", {
+            "customer_email": f"keyrace{i}@test.fr",
+            "channel": "pos",
+            "items": [{
+                "product_code": "concurrency_museum",
+                "category": "adult",
+                "visit_date": str(date.today()),
+            }],
+        })
+        assert s == 201
+        resa_ids.append(r["id"])
+    shared_key = str(uuid.uuid4())
+
+    def try_pay_other(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_ids[i]}/payments",
+            {"method": "cash", "amount": "5.00",
+             "idempotency_key": shared_key},
+        )
+
+    race = concurrent(2, try_pay_other)
+    codes = sorted(s for s, _ in race)
+    print(f"Résultats : {codes}")
+    assert codes == [201, 409], \
+        f"attendu 1 succès + 1 conflit, obtenu {codes}"
+    for rid in resa_ids:
+        s, detail = get(f"{BASE_URL}/reservations/{rid}")
+        assert s == 200
+        assert len(detail["payments"]) <= 1
+    total_payments = sum(
+        len(get(f"{BASE_URL}/reservations/{rid}")[1]["payments"])
+        for rid in resa_ids
+    )
+    assert total_payments == 1, "la clé a été honorée deux fois"
+    print("=> OK : l'index unique tranche la course, 1 seul encaissement")
+
+    print("\nConcurrence démontrée : anti-surbooking, anti double-scan, "
+          "idempotence des paiements.")
 
 
 async def run() -> None:

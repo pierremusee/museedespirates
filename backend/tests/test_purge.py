@@ -58,7 +58,11 @@ def order(*items: ReservationItemCreate, channel=SalesChannel.WEB):
 
 
 def pay(amount) -> PaymentCreate:
-    return PaymentCreate(method=PaymentMethod.CB, amount=Decimal(amount))
+    return PaymentCreate(
+        method=PaymentMethod.CB,
+        amount=Decimal(amount),
+        idempotency_key=uuid.uuid4(),
+    )
 
 
 async def booked(db: AsyncSession, session_id: uuid.UUID) -> int:
@@ -144,7 +148,7 @@ async def test_confirmed_ancien_conserve(db, catalog, frozen_now):
             )
         ),
     )
-    _, _, _, resa = await add_payment(db, resa.id, pay("10.00"))
+    resa = (await add_payment(db, resa.id, pay("10.00"))).reservation
     resa.created_at = frozen_now - timedelta(hours=2)
     await db.flush()
     assert await purge_expired_reservations(db) == []
@@ -202,7 +206,9 @@ async def test_purge_selective_sur_meme_seance(db, catalog, frozen_now):
             )
         ),
     )
-    _, _, _, confirmed = await add_payment(db, confirmed.id, pay("8.00"))
+    confirmed = (
+        await add_payment(db, confirmed.id, pay("8.00"))
+    ).reservation
     old.created_at = cutoff(frozen_now) - timedelta(seconds=1)
     recent.created_at = frozen_now - timedelta(minutes=5)
     confirmed.created_at = frozen_now - timedelta(hours=2)

@@ -2,9 +2,10 @@ import enum
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -36,10 +37,17 @@ class PaymentStatus(enum.StrEnum):
 class PaymentTransaction(Base):
     """Une tranche d'encaissement rattachée à une réservation (DFC n°7).
 
-    `amount` est le nominal remis par le client (ex. chèque-vacances de
+    `amount` est le nominal remis par le client (ex. chèques-vacances de
     60 €) ; `applied_amount` est la part réellement imputée au solde.
     Les deux diffèrent pour les ANCV excédentaires — indispensable pour
     le rapprochement de caisse.
+
+    `idempotency_key` identifie l'opération logique de paiement fournie
+    par le client (obligatoire à l'API depuis la phase « idempotence »).
+    Unique quand renseignée ; NULL pour les transactions historiques.
+    `response` conserve le snapshot JSON du PaymentResult renvoyé à
+    l'opération initiale : un rejeu de la même clé restitue cette
+    réponse verbatim, même si la commande a évolué depuis.
     """
 
     __tablename__ = "payment_transactions"
@@ -66,6 +74,12 @@ class PaymentTransaction(Base):
         ),
         default=PaymentStatus.COMPLETED,
         nullable=False,
+    )
+    idempotency_key: Mapped[uuid.UUID | None] = mapped_column(
+        unique=True, nullable=True
+    )
+    response: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

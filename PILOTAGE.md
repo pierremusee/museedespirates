@@ -46,6 +46,13 @@ sur jauge 5 → exactement 5 × 201, `booked_seats == 5`, zéro dépassement ;
 L'assertion manquante du test 5 (`test_booking.py`) a été ajoutée.
 Statut du mécanisme anti-surbooking : **démontré + reproductible**.
 
+**M4 — entamé (2026-10-09)** : volet « idempotence des paiements »
+livré et démontré — `idempotency_key` obligatoire, unique en base,
+snapshot `response` JSONB, rejeu 200 / conflit 409, concurrence
+démontrée par `test_concurrency.py` (1×201 + 7×200 même clé ;
+201 + 409 sur course inter-réservations). Reste à faire dans M4 :
+machine à états des paiements et échec/timeout simulables.
+
 **M2 — CI minimale : terminée et validée (2026-10-07).**
 
 Preuve : run GitHub Actions vert sur `main` —

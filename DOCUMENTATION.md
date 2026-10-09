@@ -1,6 +1,6 @@
 # Musée des Pirates — Documentation du projet
 
-> **Dernière mise à jour : 2026-10-08**
+> **Dernière mise à jour : 2026-10-09**
 > Ce document est la référence vivante du projet. Il doit être mis à jour à
 > chaque évolution (voir §13 — Maintenance). Cible : `OBJECTIFS.md` ;
 > pilotage : `PILOTAGE.md`. La mémoire Honcho (peer `user-default-dev`) est
@@ -133,7 +133,7 @@ musee/
 | `seasonal_periods` | `SeasonalPeriod` | Plages « haute saison » déclenchant le modificateur tarifaire (DFC n°5 §4). |
 | `reservations` | `Reservation` | Commande/panier. `status` : `pending` / `confirmed` / `cancelled` / `expired`. `sales_channel` : `web` / `pos`. Propriétés `paid_amount`, `amount_due`. |
 | `reservation_items` | `ReservationItem` | Ligne de commande. Fige `computed_price`, `season_modifier`, `visit_date`, `session_ids` (JSONB), `group_size`, `free_profile`, `category`, `extra_children`. |
-| `payment_transactions` | `PaymentTransaction` | Tranche d'encaissement (DFC n°7). `method` : `cb` / `cash` / `ancv` / `check`. `amount` = nominal remis, `applied_amount` = part imputée (diffèrent pour ANCV excédentaire). `status` : `completed` (+ `refunded`/`cancelled` envisagés). |
+| `payment_transactions` | `PaymentTransaction` | Tranche d'encaissement (DFC n°7). `method` : `cb` / `cash` / `ancv` / `check`. `amount` = nominal remis, `applied_amount` = part imputée (diffèrent pour ANCV excédentaire). `status` : `completed` (+ `refunded`/`cancelled` envisagés). `idempotency_key` : UUID unique identifiant l'opération logique (NULL pour l'historique). `response` : snapshot JSONB du `PaymentResult` initial, restitué verbatim au rejeu. |
 | `tickets` | `Ticket` | **1 billet = 1 personne**. `id` (UUID) = jeton encodé dans le QR. `ticket_category` : `adult` / `child` / `reduced` / `group` / `school`. `item_id` = item « ancre » (warning gratuité au scan). `menu_choice` : `viande` / `poisson` / `vegetarien` / `enfant` (optionnel). |
 | `ticket_accesses` | `TicketAccess` | Droit d'accès unitaire porté par un billet, consommé **indépendamment** au scan. `access_type` (enum `ticket_type`) : `open_ticket` / `session_standard` / `session_dining`. `session_id`, `event_id`, `valid_date`, `is_scanned`/`scanned_at` **par accès**. |
 
@@ -169,7 +169,9 @@ Event (supersédé par products) → `d38f51a62b90` catalogue produits →
 `e5a91c7f3d28` gratuité → `c7d31e08a4f6` groupes → `f2c4a8e91b07` paiements →
 `e8a2f50b1c39` réservation expirée → `a1c9e4f7b2d3` billet multi-accès →
 `b7e2a1f09c34` refonte billets → `d4b8c2e61a07` `events.description`
-(affiche des productions).
+(affiche des productions) → `e6b3f1a84c2d` `products.is_addon` →
+`f5a8c1d93e04` idempotence des paiements (`idempotency_key` unique +
+`response` JSONB — non destructive, NULL pour l'historique).
 
 ---
 
@@ -249,6 +251,48 @@ Accompagnateur PMR : **max 1 par porteur `disability`** dans la même commande.
 | Rendu | — | espèces : oui ; **ANCV : jamais** (excédent perdu, `amount` ≠ `applied_amount`) |
 | Chèque | non | réservé aux commandes contenant groupe/scolaire |
 
+### Idempotence des paiements (2026-10-09)
+
+`POST /reservations/{id}/payments` exige `idempotency_key` (UUID, dans
+le corps JSON — validé par Pydantic ; pas d'en-tête dédié) identifiant
+**l'opération logique** d'encaissement :
+
+- **clé nouvelle** → traitement normal, `201` ;
+- **même clé + même contenu** (réservation, moyen, montant) → rejeu :
+  `200` + corps **identique** au premier appel (snapshot `response`
+  JSONB restitué verbatim — solde historique, tickets initiaux, même
+  si la commande a été annulée ou soldée depuis) ;
+- **même clé + contenu différent** (autre montant, autre moyen, autre
+  réservation) → `409 Conflict` ;
+- **échec avant enregistrement** (validation 4xx, rollback, crash) →
+  la clé n'est pas consommée : le retry est une nouvelle tentative
+  légitime, pas un conflit.
+
+Mécanique dans `add_payment` : lookup de la clé avant le verrou
+(chemin rapide), `SELECT ... FOR UPDATE` sur la réservation, **second
+lookup sous le verrou** (un concurrent de même clé a pu commiter
+entre-temps — son rejeu prime sur la garde « déjà soldée »), puis
+imputation + émission + **snapshot sérialisé dans la même transaction**
+(`flush` avant `model_dump` pour disposer des ids/`created_at`). La
+contrainte `uq_payment_transactions_idempotency_key` reste la garantie
+ultime : une course entre deux réservations sur la même clé provoque
+une `IntegrityError` → rollback → relecture → rejeu ou 409 selon
+l'empreinte. **Démontré sous concurrence** (`test_concurrency.py` :
+8 paiements simultanés même clé → 1×201 + 7×200, 1 transaction ;
+même clé sur 2 réservations → 201 + 409).
+
+**Cycle de vie client** : clé `crypto.randomUUID()` créée au
+déclenchement d'une nouvelle opération, conservée tant que l'issue est
+incertaine (réseau, timeout, 5xx), libérée après succès ou rejet 4xx
+certain. Caisse : verrou synchrone `paymentInFlight` (ref — le state
+`busy` laisse passer un double clic dans le même batch React).
+Billetterie web : l'opération en attente (réservation + clé + montant,
+rien de sensible) est persistée en `sessionStorage`
+(`pending-payment.ts`, testé vitest) — la reprise rejoue le paiement
+sur **la même réservation** sans recréer de panier ; une opération en
+attente sur un autre produit est résolue par `GET /reservations/{id}`
+avant écrasement (confirmée → `/succes`, sinon abandonnée à la purge).
+
 ### Groupes
 
 - Seuil officiel : **minimum 8 personnes** (`MIN_GROUP_SIZE = 8`),
@@ -300,7 +344,7 @@ Base : `http://localhost:8000` — docs auto : `/docs` (Swagger).
 | GET | `/seasonal/check?date=YYYY-MM-DD` | `{date, high_season}` — modificateur DFC n°5. |
 | POST | `/reservations` | Crée le panier : `{customer_email, channel, items[]}`. Item : `product_code`, `category`, `visit_date`, `session_id`/`session_ids`, `extra_children`, `group_size`, `free_profile`. → `201 ReservationRead` (pending, sièges réservés). |
 | GET | `/reservations/{id}` | Détail : items, tickets+accesses, payments, `paid_amount`, `amount_due`. |
-| POST | `/reservations/{id}/payments` | Tranche d'encaissement `{method, amount}` → `201 PaymentResult` (`change_due`, `amount_due`, `reservation_status`, `tickets` si soldé). |
+| POST | `/reservations/{id}/payments` | Tranche d'encaissement `{method, amount, idempotency_key}` → `201 PaymentResult` (`change_due`, `amount_due`, `reservation_status`, `tickets` si soldé). Rejeu même clé+même contenu → `200` + snapshot identique ; même clé + contenu différent → `409` (§5 Idempotence). |
 | POST | `/reservations/{id}/cancel` | Annule une commande `pending` (guichet) — sièges restitués, paiements conservés. |
 | POST | `/tickets/{ticket_id}/scan` | Contrôle d'accès `{event_id}` XOR `{session_id}` → `TicketScanResponse`. |
 | POST | `/admin/reservations/purge` | Expire les `pending` > 15 min, restitue la jauge. |
@@ -317,10 +361,10 @@ serveur (`cache: "no-store"`) sur `NEXT_PUBLIC_API_URL`.
 | `/` | `app/page.tsx` | Accueil « Musée des Pirates » + CTA réservation. |
 | `/reserver` | `(client)/reserver/page.tsx` | Server Component : catalogue produits en cartes, séances du jour, badge haute saison, sold-out. `?date=` pilote le jour. |
 | | `date-picker.tsx` | Calendrier shadcn + popover + date-fns (fr) → pousse `?date=`. |
-| | `reservation-dialog.tsx` | Client : compteurs par tarif + profils gratuits, choix de séance(s), séance supplémentaire `extra_show` fusionnée, estimation live (re-calculée serveur), POST reservation + paiement CB simulé, redirect `/succes`. |
+| | `reservation-dialog.tsx` | Client : compteurs par tarif + profils gratuits, choix de séance(s), séance supplémentaire `extra_show` fusionnée, estimation live (re-calculée serveur), POST reservation + paiement CB simulé **idempotent** (`idempotency_key`, reprise `sessionStorage` via `pending-payment.ts`), redirect `/succes`. |
 | `/succes` | `(client)/succes/page.tsx` | Confirmation : lignes, total, référence, puis **cartes-billets** (`TicketCard`) + bouton « Imprimer les billets ». |
 | `/scanner` | `(admin)/scanner/page.tsx` | Client : sélecteur de poste (entrée musée / séances du jour), `@yudiel/react-qr-scanner`, verdict vert/rouge, warning justificatif, droits restants. |
-| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` + `cart.ts` | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), composition miroir à l'ajout (uniquement des droits non encore couverts — `copiableCounts`), **optimisation automatique « Pass 1 Spectacle »** quand musée + séance à composition strictement identique coexistent (`strictPassHint` → lignes consommées supprimées, badge « Optimisé », toast d'économie ; cas partiels/ambigus = suggestion explicite `passSuggestion`), absorption des lignes simples au clic direct sur le Pass, séance supplémentaire par ligne (`addExtraShow`), multi-paiements avec rendu, annulation « Modifier la commande », émission/impression des cartes-billets. Logique panier extraite dans `cart.ts` (purs fonctions, testées par `cart.test.ts` — vitest). |
+| `/caisse` | `(admin)/caisse/page.tsx` + `pos-terminal.tsx` + `cart.ts` | Terminal POS guichet : **ligne = produit × N personnes** (compteurs par tarif, profils gratuits inclus), composition miroir à l'ajout (uniquement des droits non encore couverts — `copiableCounts`), **optimisation automatique « Pass 1 Spectacle »** quand musée + séance à composition strictement identique coexistent (`strictPassHint` → lignes consommées supprimées, badge « Optimisé », toast d'économie ; cas partiels/ambigus = suggestion explicite `passSuggestion`), absorption des lignes simples au clic direct sur le Pass, séance supplémentaire par ligne (`addExtraShow`), multi-paiements **idempotents** avec rendu (clé par tranche, verrou synchrone anti double-clic, reprise après issue incertaine), annulation « Modifier la commande », émission/impression des cartes-billets. Logique panier extraite dans `cart.ts` (purs fonctions, testées par `cart.test.ts` — vitest). |
 
 **Billet carte (CR80, 85,6 × 54 mm)** — composant partagé
 `components/ticket-card.tsx` : QR (`ticket-qr.tsx`, ~23 mm, jeton =
@@ -377,7 +421,8 @@ pytest --cov=app --cov-report=term-missing --cov-report=xml
 # Frontend (depuis frontend/)
 npm run dev    # :3000
 npm run lint   # eslint
-npm test       # vitest — logique panier caisse (cart.test.ts)
+npm test       # vitest — logique panier caisse (cart.test.ts) +
+               # reprise de paiement web (pending-payment.test.ts)
 npm test -- --coverage   # + coverage v8 (plancher 80 %, vitest.config.ts)
 npx tsc --noEmit
 ```
@@ -385,7 +430,10 @@ npx tsc --noEmit
 `test_booking.py` couvre : panier mixte + paiement CB, haute saison,
 cohérence visit_date, scans (musée/séance/double-scan/autre jour),
 surbooking séquentiel, multi-paiements POS (cash+ANCV, chèque réservé
-groupes), seuil groupe ≥ 8, `extra_show` fusionné, purge des paniers
+groupes), **idempotence E2E** (rejeu même clé → `200` + snapshot
+identique, même clé + montant/méthode divergents → `409`, et le test
+12 re-vérifie `len(payments) == 1`), seuil groupe ≥ 8, `extra_show`
+fusionné, purge des paniers
 expirés, fenêtre de vente des séances (tolérance vendue+scannée, expirée
 refusée), **annulation guichet** (restitution de jauge prouvée
 fonctionnellement sur séance cap-1, encaissements conservés, rejets
@@ -402,12 +450,18 @@ régression temporaire sur le refus ANCV/web). Jours de test **relatifs** :
 hors de toute `SeasonalPeriod` existante et hors de la fenêtre « HS test »
 (reproductible toute l'année, y compris en juillet-août).
 
-`test_concurrency.py` (M1) démontre sous concurrence réelle (threads +
-barrière, requêtes simultanées) : 30 réservations concurrentes sur jauge 5
-→ exactement 5 × 201, `booked_seats == 5` ; 8 scans concurrents du même
-accès → exactement 1 × 200. Seed idempotent, relançable à volonté.
+`test_concurrency.py` (M1 + idempotence 2026-10-09) démontre sous
+concurrence réelle (threads + barrière, requêtes simultanées) :
+30 réservations concurrentes sur jauge 5 → exactement 5 × 201,
+`booked_seats == 5` ; 8 scans concurrents du même accès → exactement
+1 × 200 ; **8 paiements concurrents portant la même clé d'idempotence
+sur une même commande → 1 × 201 + 7 × 200, un seul `payment.id`, une
+seule transaction en base** ; **même clé sur deux réservations
+distinctes → 201 + 409, un seul encaissement** (l'index unique tranche
+la course que le FOR UPDATE ne sérialise pas). Seed idempotent,
+relançable à volonté.
 
-**Suite métier pytest** (2026-10-08) : `backend/tests/` — 100 tests en
+**Suite métier pytest** (2026-10-09) : `backend/tests/` — 109 tests en
 ~25 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
@@ -433,8 +487,12 @@ défensives documentées non testées : « sans séance associée »
 dîner-spectacle (aucun produit ne l'émet). `test_payments.py` :
 garde-fous d'encaissement (404, commande soldée/expirée, chèque réservé
 aux groupes dans les deux sens, CB/chèque au-delà du solde, ANCV
-partiel au POS) et intégrité « commande → paiement » — produit modifié
-ou séance supprimée entre-temps → **409** ; `test_reservation_rules.py`
+partiel au POS), intégrité « commande → paiement » — produit modifié
+ou séance supprimée entre-temps → **409** — et **idempotence** (9 tests :
+rejeu même clé sans doublon, snapshot historique restitué après un
+paiement ultérieur ou une annulation, 409 sur montant/méthode/
+réservation divergents, multi-paiements à clés distinctes préservés,
+clé non consommée par un échec 4xx, rejeu web sans double émission) ; `test_reservation_rules.py`
 couvre en plus catégorie manquante, incohérence `visit_date`/séance du
 Pass et catalogue corrompu (produit sans droit, composant musée sans
 événement, événement inactif, groupe sans tarif) ; `test_pricing.py`
@@ -449,7 +507,7 @@ Coverage `pytest-cov` — `app/` **81 %**, `app/services/` **~99,5 %**
 garde d'idempotence 172, défensive — ticket_service 98 % ; les
 `api/*` à 0 % sont exercées par l'E2E dans un autre
 processus) ; plancher `fail_under=65`. Coverage frontend via
-`@vitest/coverage-v8` — baseline **87 %** (cart.ts 87 %, plancher 80 %
+`@vitest/coverage-v8` — baseline **88 %** (cart.ts 87 %, pending-payment.ts 95 %, plancher 80 %
 dans `vitest.config.ts`). Rapports (`.coverage`, `coverage.xml`,
 `htmlcov/`, `coverage/`) ignorés par git.
 
@@ -667,6 +725,21 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   `next typegen`, absents sans build). Adoption de ruff au passage :
   enums migrés `str, enum.Enum` → `enum.StrEnum` (Python 3.11), idiome
   `Depends` déclaré, ~30 autofix (imports, `Union` → `|`, `Decimal`).
+- ✅ **Idempotence des paiements** (2026-10-09) : `idempotency_key`
+  UUID obligatoire sur `POST /reservations/{id}/payments`, unique en
+  base (`uq_payment_transactions_idempotency_key`) ; snapshot
+  `response` JSONB du `PaymentResult` enregistré dans la même
+  transaction que l'encaissement et les billets. Rejeu même clé +
+  même contenu → `200` + corps identique ; contenu divergent → `409` ;
+  échec avant enregistrement → clé non consommée. Double lookup de la
+  clé (avant et **sous** le `FOR UPDATE`) — sans le second, un
+  concurrent de même clé tombait sur « déjà soldée » au lieu de rejouer
+  (cas découvert et corrigé via `test_concurrency.py`). Filet
+  `IntegrityError` → rollback → relecture → rejeu/409 pour la course
+  inter-réservations. Front : verrou synchrone caisse + cycle de vie
+  de clé par tranche, reprise web `sessionStorage` sans recréer de
+  panier (`pending-payment.ts`). 109 tests pytest + rejeu E2E +
+  concurrence démontrée.
 
 ### Backlog (feuille de route non figée)
 
@@ -711,6 +784,15 @@ Apple/Google Wallet).
   fusionner sur un même billet.
 - `TicketScanRequest` : pas d'authentification sur les endpoints (dev only,
   CORS ouvert).
+- `POST /reservations` n'est pas idempotent : un double-submit crée
+  deux `pending` tenant la jauge — le retry navigateur est couvert
+  côté paiement, pas côté création de panier (phase ultérieure si
+  besoin réel).
+- La purge peut expirer un `pending` **partiellement payé** : les
+  encaissements restent tracés mais la commande meurt — remboursement
+  manuel (connu DFC n°7, à traiter avec la machine à états M4).
+- ESLint signale un artefact `coverage/block-navigation.js` généré
+  par `vitest --coverage` local (warning, non bloquant, hors git).
 - Gotcha uvicorn : sous Windows, `--reload` crée une chaîne reloader →
   worker → `spawn_main` ; tuer le parent laisse le petit-fils orphelin
   **qui continue de servir l'ancien code** sur :8000 (constaté : vente

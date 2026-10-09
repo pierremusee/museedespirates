@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CalendarClock, Loader2, Minus, Plus, Ticket } from "lucide-react";
 import { toast } from "sonner";
@@ -18,6 +18,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import {
+  clearPendingPayment,
+  pendingAction,
+  previousOutcome,
+  readPendingPayment,
+  savePendingPayment,
+  type PendingPayment,
+} from "./pending-payment";
 
 type Category = "adult" | "child" | "reduced";
 type FreeProfile = "under_4" | "disability" | "pmr_companion";
@@ -108,6 +116,12 @@ export function ReservationDialog({
   const [selectedSessions, setSelectedSessions] = useState<string[]>([]);
   const [extraSessionId, setExtraSessionId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Verrou synchrone : `submitting` (state) laisse passer un double
+  // submit dans le même batch React — le ref bloque immédiatement.
+  const submitInFlight = useRef(false);
+  // Paiement à l'issue incertaine en attente (même réservation, même
+  // clé d'idempotence) — miroir de sessionStorage, cf pending-payment.ts.
+  const pendingRef = useRef<PendingPayment | null>(null);
 
   const isFamily = product.kind === "family";
   const needsSessions = sessionCount > 0;
@@ -181,6 +195,7 @@ export function ReservationDialog({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (submitInFlight.current) return;
     if (needsSessions && selectedSessions.length !== sessionCount) {
       toast.error(
         `Sélectionnez ${sessionCount} séance${sessionCount > 1 ? "s" : ""}.`
@@ -210,8 +225,51 @@ export function ReservationDialog({
     }
 
     setSubmitting(true);
+    submitInFlight.current = true;
     try {
-      const base = {
+      const api = process.env.NEXT_PUBLIC_API_URL;
+      // Opération à l'issue incertaine persistée (mémoire, puis
+      // sessionStorage pour survivre au rechargement de page).
+      let pending =
+        pendingRef.current ?? readPendingPayment(sessionStorage);
+
+      if (
+        pending &&
+        pendingAction(pending, product.code) === "check_previous"
+      ) {
+        // L'opération en attente concernait un autre produit : résoudre
+        // son issue avant de l'écraser. Confirmée → le paiement avait
+        // abouti, on conclut sur cette commande ; sinon la purge TTL
+        // restituera sa jauge et la nouvelle opération démarre libre.
+        let prevStatus: string | null = null;
+        try {
+          const chk = await fetch(
+            `${api}/reservations/${pending.reservationId}`,
+            { cache: "no-store" }
+          );
+          if (chk.ok) prevStatus = (await chk.json()).status;
+        } catch {
+          prevStatus = null; // injoignable → abandon
+        }
+        if (previousOutcome(prevStatus) === "conclude") {
+          pendingRef.current = null;
+          clearPendingPayment(sessionStorage);
+          setOpen(false);
+          router.push(`/succes?id=${pending.reservationId}`);
+          return;
+        }
+        pending = null;
+        pendingRef.current = null;
+        clearPendingPayment(sessionStorage);
+      }
+
+      // Reprise : même réservation, même clé — jamais de second panier.
+      const resuming = pending !== null;
+      let reservationId = pending?.reservationId ?? "";
+      let reservationTotal = pending?.amount ?? "0";
+
+      if (!resuming) {
+        const base = {
         visit_date: hasMuseumDay ? visitDate : undefined,
         session_ids: needsSessions ? selectedSessions : undefined,
       };
@@ -286,18 +344,15 @@ export function ReservationDialog({
         }
       }
 
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/reservations`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            customer_email: email,
-            channel: "web",
-            items,
-          }),
-        }
-      );
+      const res = await fetch(`${api}/reservations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customer_email: email,
+          channel: "web",
+          items,
+        }),
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         toast.error(body.detail ?? `Erreur ${res.status} lors de la réservation.`);
@@ -306,40 +361,98 @@ export function ReservationDialog({
         return;
       }
       const reservation = await res.json();
+      reservationId = reservation.id;
+      reservationTotal = reservation.total_price;
+      // L'opération est enregistrée AVANT l'appel de paiement : si la
+      // réponse se perd, le prochain essai la reprendra telle quelle.
+      if (Number(reservation.total_price) > 0) {
+        pending = {
+          reservationId: reservation.id,
+          productCode: product.code,
+          paymentKey: crypto.randomUUID(),
+          amount: reservation.total_price,
+        };
+        pendingRef.current = pending;
+        savePendingPayment(pending, sessionStorage);
+      }
+      }
 
       // Canal web (DFC n°7) : paiement unique par CB, simulé ici.
       // Les commandes à 0 € sont déjà confirmées — bypass intact.
-      if (Number(reservation.total_price) > 0) {
+      if (pending && Number(reservationTotal) > 0) {
+        if (!pending.paymentKey) {
+          // La tentative précédente a été rejetée (4xx certain) : la
+          // clé est libérée, cette nouvelle tentative en reçoit une
+          // neuve — la réservation pending n'est pas recréée.
+          pending.paymentKey = crypto.randomUUID();
+          pendingRef.current = pending;
+          savePendingPayment(pending, sessionStorage);
+        }
         const payRes = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL}/reservations/${reservation.id}/payments`,
+          `${api}/reservations/${pending.reservationId}/payments`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               method: "cb",
-              amount: reservation.total_price,
+              amount: pending.amount,
+              idempotency_key: pending.paymentKey,
             }),
           }
         );
         if (!payRes.ok) {
           const body = await payRes.json().catch(() => ({}));
-          toast.error(body.detail ?? "Le paiement par carte a échoué.");
+          if (payRes.status >= 500) {
+            // Issue incertaine : clé et paramètres conservés pour
+            // reprise à la prochaine tentative.
+            toast.error(
+              "Erreur serveur — le résultat du paiement est incertain ; il sera repris au prochain essai."
+            );
+          } else {
+            // Rejet métier certain (4xx) : rien n'est enregistré — la
+            // clé est libérée ; si la réservation n'est plus payable
+            // (expirée/annulée), l'opération est abandonnée.
+            let payable = true;
+            try {
+              const chk = await fetch(
+                `${api}/reservations/${pending.reservationId}`,
+                { cache: "no-store" }
+              );
+              payable = chk.ok && (await chk.json()).status === "pending";
+            } catch {
+              payable = true; // statut inconnu → on conserve l'opération
+            }
+            if (payable) {
+              pending.paymentKey = null;
+              pendingRef.current = pending;
+              savePendingPayment(pending, sessionStorage);
+            } else {
+              pendingRef.current = null;
+              clearPendingPayment(sessionStorage);
+            }
+            toast.error(body.detail ?? "Le paiement par carte a échoué.");
+          }
           setOpen(false);
           router.refresh();
           return;
         }
       }
 
+      pendingRef.current = null;
+      clearPendingPayment(sessionStorage);
       toast.success(
         estimate === 0
           ? "Entrées gratuites validées !"
           : "Paiement accepté — réservation confirmée !"
       );
       setOpen(false);
-      router.push(`/succes?id=${reservation.id}`);
+      router.push(`/succes?id=${reservationId}`);
     } catch {
+      // Réseau/timeout : l'opération en attente (le cas échéant) reste
+      // persistée et sera reprise au prochain essai.
       toast.error("Impossible de joindre le serveur. Réessayez plus tard.");
     } finally {
+      submitInFlight.current = false;
       setSubmitting(false);
     }
   }

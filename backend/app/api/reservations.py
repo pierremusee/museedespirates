@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -90,21 +90,22 @@ async def cancel_reservation(
 async def pay_reservation(
     reservation_id: uuid.UUID,
     data: PaymentCreate,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> PaymentResult:
-    """Encaisse une tranche de paiement (DFC n°7).
+    """Encaisse une tranche de paiement (DFC n°7), idempotent.
+
+    `idempotency_key` (obligatoire) identifie l'opération logique :
+    - même clé + même contenu → rejeu du résultat initial (200, corps
+      identique au premier appel, sans nouvel encaissement) ;
+    - même clé + contenu différent → 409 ;
+    - clé nouvelle → encaissement normal (201).
 
     Canal `web` : CB unique du montant total. Canal `pos` : multi-
     paiements (cb, cash, ancv, check) ; rendu de monnaie sur les
     espèces uniquement, jamais sur les chèques-vacances.
     """
-    payment, change_due, amount_due, reservation = (
-        await reservation_service.add_payment(db, reservation_id, data)
-    )
-    return PaymentResult(
-        payment=payment,
-        change_due=change_due,
-        amount_due=amount_due,
-        reservation_status=reservation.status,
-        tickets=reservation.tickets,
-    )
+    outcome = await reservation_service.add_payment(db, reservation_id, data)
+    if outcome.replayed:
+        response.status_code = status.HTTP_200_OK
+    return outcome.result

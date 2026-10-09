@@ -310,11 +310,22 @@ def get(url: str) -> tuple[int, dict | list]:
     return status, body
 
 
-def pay(reservation_id: str, method: str, amount: str) -> tuple[int, dict]:
+def pay(
+    reservation_id: str,
+    method: str,
+    amount: str,
+    key: str | None = None,
+) -> tuple[int, dict]:
     print(f"   Paiement {method} {amount} € :")
     return post(
         f"{BASE_URL}/reservations/{reservation_id}/payments",
-        {"method": method, "amount": amount},
+        {
+            "method": method,
+            "amount": amount,
+            # Clé d'idempotence : une nouvelle par défaut (nouvelle
+            # opération), réutilisée explicitement pour tester le rejeu.
+            "idempotency_key": key or str(uuid.uuid4()),
+        },
     )
 
 
@@ -360,7 +371,10 @@ async def main() -> None:
     expect(pay(resa["id"], "ancv", "87.00"), 400, "ANCV refusé en ligne")
     expect(pay(resa["id"], "cb", "50.00"), 400, "CB partiel refusé en ligne")
 
-    paid = expect(pay(resa["id"], "cb", "87.00"), 201, "test 1 — paiement CB")
+    key1 = str(uuid.uuid4())
+    paid = expect(
+        pay(resa["id"], "cb", "87.00", key=key1), 201,
+        "test 1 — paiement CB")
     assert paid["reservation_status"] == "confirmed"
     assert Decimal(paid["amount_due"]) == Decimal(0)
     tickets = paid["tickets"]
@@ -373,6 +387,19 @@ async def main() -> None:
     print("=> OK : billets multi-accès + total 87.00 conformes DFC n°5")
 
     expect(pay(resa["id"], "cb", "1.00"), 400, "paiement sur commande soldée")
+
+    # Idempotence : même clé + même contenu → rejeu 200 du snapshot
+    # initial (même transaction, aucun doublon) ; même clé + contenu
+    # différent → 409. Le test 12c re-vérifiera len(payments) == 1.
+    replay = expect(
+        pay(resa["id"], "cb", "87.00", key=key1), 200,
+        "test 1 — rejeu même clé")
+    assert replay == paid, "le rejeu doit restituer le snapshot initial"
+    expect(pay(resa["id"], "cb", "50.00", key=key1), 409,
+           "test 1 — même clé, montant différent")
+    expect(pay(resa["id"], "ancv", "87.00", key=key1), 409,
+           "test 1 — même clé, méthode différente")
+    print("=> OK : rejeu idempotent 200 + conflits de clé 409")
 
     print("\nTest 2 — pass_1_show adulte en HAUTE SAISON (attendu 22.00 = 20+2) :")
     resa2 = expect(post(f"{BASE_URL}/reservations", {

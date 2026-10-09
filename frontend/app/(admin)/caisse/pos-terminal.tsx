@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Banknote,
   ChevronDown,
@@ -153,6 +153,16 @@ export function PosTerminal({
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [amountStr, setAmountStr] = useState("");
   const [busy, setBusy] = useState(false);
+  // Verrou synchrone : `busy` (state React) laisse passer un double
+  // clic dans le même batch — le ref bloque la rentrée immédiatement.
+  const paymentInFlight = useRef(false);
+  // Opération d'encaissement incertaine : clé + paramètres figés tant
+  // que le serveur n'a pas tranché (succès ou rejet métier certain).
+  const pendingPayment = useRef<{
+    key: string;
+    method: PaymentMethod;
+    amount: string;
+  } | null>(null);
 
   const hasGroup = lines.some((l) => l.product.kind === "group");
   const estimate = lines.reduce(
@@ -462,24 +472,50 @@ export function PosTerminal({
       : 0;
 
   async function pay() {
-    if (!order || amount <= 0 || busy) return;
+    if (!order || amount <= 0 || paymentInFlight.current) return;
+    paymentInFlight.current = true;
     setBusy(true);
+    // Idempotence : une opération dont l'issue est incertaine reprend
+    // sa clé et ses paramètres figés ; une nouvelle opération reçoit
+    // une clé neuve.
+    const op = pendingPayment.current ?? {
+      key: crypto.randomUUID(),
+      method,
+      amount: amount.toFixed(2),
+    };
+    pendingPayment.current = op;
     try {
       const res = await fetch(`${API}/reservations/${order.id}/payments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ method, amount: amount.toFixed(2) }),
+        body: JSON.stringify({
+          method: op.method,
+          amount: op.amount,
+          idempotency_key: op.key,
+        }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if (res.status >= 500) {
+          // Erreur serveur : issue incertaine — la clé est conservée,
+          // le prochain essai reprendra cette même opération.
+          toast.error(
+            "Erreur serveur : le résultat de l'encaissement est incertain — réessayez."
+          );
+          return;
+        }
+        // Rejet métier certain (4xx) : l'opération est close, la clé
+        // est libérée pour une éventuelle nouvelle tentative.
+        pendingPayment.current = null;
         toast.error(body.detail ?? `Erreur ${res.status} au paiement.`);
         return;
       }
+      pendingPayment.current = null;
       const change = Number(body.change_due);
       setPayments((prev) => [
         ...prev,
         {
-          method,
+          method: op.method,
           amount: Number(body.payment.amount),
           applied: Number(body.payment.applied_amount),
           change,
@@ -510,8 +546,13 @@ export function PosTerminal({
       }
       setAmountStr(body.amount_due > 0 ? String(body.amount_due) : "");
     } catch {
-      toast.error("Serveur inaccessible.");
+      // Erreur réseau/timeout : le serveur a peut-être enregistré
+      // l'opération — clé et paramètres conservés pour la reprise.
+      toast.error(
+        "Connexion perdue : résultat de l'encaissement incertain — réessayez avant de modifier le montant."
+      );
     } finally {
+      paymentInFlight.current = false;
       setBusy(false);
     }
   }
@@ -532,6 +573,7 @@ export function PosTerminal({
       const refunded = order.paid;
       setOrder(null);
       setPayments([]);
+      pendingPayment.current = null;
       setAmountStr("");
       toast.success(
         refunded > 0
@@ -550,6 +592,7 @@ export function PosTerminal({
     setLines([]);
     setOrder(null);
     setPayments([]);
+    pendingPayment.current = null;
     setTickets([]);
     setShowTickets(false);
     setAmountStr("");
