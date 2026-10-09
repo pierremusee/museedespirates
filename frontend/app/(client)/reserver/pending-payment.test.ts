@@ -86,4 +86,13 @@ describe("previousOutcome", () => {
   it("réponse OK sans statut → unknown (état non établi)", () => {
     expect(previousOutcome(true, null)).toBe("unknown");
   });
+
+  it.each(["processing", "", "statut inconnu", "CONFIRMED"])(
+    "statut non reconnu %j → unknown, jamais abandon",
+    (status) => {
+      // Liste blanche : toute valeur non prévue (nouvel état backend,
+      // chaîne mal formée) conserve l'opération et bloque le flux.
+      expect(previousOutcome(true, status)).toBe("unknown");
+    }
+  );
 });

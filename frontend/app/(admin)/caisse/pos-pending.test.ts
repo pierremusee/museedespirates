@@ -78,4 +78,14 @@ describe("posResolution", () => {
   it("réponse OK sans statut → blocked (état non établi)", () => {
     expect(posResolution(true, null)).toBe("blocked");
   });
+
+  it.each(["processing", "", "statut inconnu", "PENDING"])(
+    "statut non reconnu %j → blocked, jamais abandon ni déblocage",
+    (status) => {
+      // Liste blanche : toute valeur non prévue (nouvel état backend,
+      // chaîne mal formée) conserve l'opération et garde la caisse
+      // bloquée jusqu'à résolution.
+      expect(posResolution(true, status)).toBe("blocked");
+    }
+  );
 });

@@ -81,10 +81,13 @@ export function previousOutcome(
   httpOk: boolean,
   status: string | null
 ): PreviousOutcome {
-  // Un échec de lecture (réseau, 4xx/5xx, corps sans statut) ne prouve
-  // rien sur le sort du paiement : l'opération reste incertaine et
-  // doit être conservée — jamais assimilée à un abandon.
+  // Un échec de lecture (réseau, 4xx/5xx, corps sans statut) ou un
+  // statut non reconnu (valeur nouvelle/inattendue du backend) ne
+  // prouve rien sur le sort du paiement : l'opération reste incertaine
+  // et doit être conservée — jamais assimilée à un abandon.
   if (!httpOk || status === null) return "unknown";
   if (status === "confirmed") return "conclude";
-  return "abandon";
+  if (["pending", "cancelled", "expired"].includes(status))
+    return "abandon";
+  return "unknown";
 }

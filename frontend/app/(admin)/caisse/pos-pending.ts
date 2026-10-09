@@ -72,11 +72,13 @@ export function posResolution(
   httpOk: boolean,
   status: string | null
 ): PosResolution {
-  // Un échec de lecture (réseau, 4xx/5xx, corps sans statut) ne prouve
-  // rien sur l'encaissement : la caisse reste bloquée, aucune nouvelle
-  // vente ne démarre silencieusement.
+  // Un échec de lecture (réseau, 4xx/5xx, corps sans statut) ou un
+  // statut non reconnu (valeur nouvelle/inattendue du backend) ne
+  // prouve rien sur l'encaissement : la caisse reste bloquée, aucune
+  // nouvelle vente ne démarre silencieusement.
   if (!httpOk || status === null) return "blocked";
   if (status === "confirmed") return "conclude";
   if (status === "pending") return "resume";
-  return "abandon";
+  if (status === "cancelled" || status === "expired") return "abandon";
+  return "blocked";
 }
