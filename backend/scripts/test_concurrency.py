@@ -116,6 +116,14 @@ async def seed() -> dict:
             max_capacity=K,
         )
         db.add(session)
+        # Seconde séance pour la course de clé sur commandes à séance
+        # (la première est saturée par le test de surbooking).
+        session_pay = Session(
+            event_id=theater.id,
+            start_time=datetime.now(UTC) + timedelta(days=2),
+            max_capacity=10,
+        )
+        db.add(session_pay)
         wanted = {
             "concurrency_theater": Product(
                 code="concurrency_theater", label="Concurrence Théâtre",
@@ -162,6 +170,7 @@ async def seed() -> dict:
         await db.commit()
         ids = {
             "session": str(session.id),
+            "session_pay": str(session_pay.id),
             "musee": str(musee.id),
         }
     await engine.dispose()
@@ -475,6 +484,60 @@ async def main() -> None:
     assert Decimal(detail["amount_due"]) == Decimal("1.00")
     assert detail["status"] == "pending"
     print("=> OK : 4 tranches distinctes enregistrées, solde exact")
+
+    # --- 8. Course de clé : commandes à séance soldées -----------------
+    # Régression AUDIT-001 : même clé sur deux réservations comportant
+    # une séance, l'encaissement soldant la commande — l'autoflush
+    # déclenché par _emit_tickets laissait échapper l'IntegrityError
+    # (500 au lieu de 409). Le perdant ne doit laisser aucun état
+    # partiel : ni paiement, ni billet, commande encore pending.
+    print("\nCourse de clé à séance : même clé, commandes soldées")
+    resa_ids = []
+    for i in range(2):
+        s, r = post(f"{BASE_URL}/reservations", {
+            "customer_email": f"keyrace_session{i}@test.fr",
+            "channel": "pos",
+            "items": [{
+                "product_code": "concurrency_theater",
+                "category": "adult",
+                "session_id": ids["session_pay"],
+            }],
+        })
+        assert s == 201, r
+        resa_ids.append(r["id"])
+    session_key = str(uuid.uuid4())
+
+    def try_pay_session(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_ids[i]}/payments",
+            {"method": "cash", "amount": "10.00",
+             "idempotency_key": session_key},
+        )
+
+    race = concurrent(2, try_pay_session)
+    codes = sorted(s for s, _ in race)
+    print(f"Résultats : {codes}")
+    assert codes == [201, 409], \
+        f"attendu 1 succès + 1 conflit, obtenu {codes}"
+    details = []
+    for rid in resa_ids:
+        s, detail = get(f"{BASE_URL}/reservations/{rid}")
+        assert s == 200
+        details.append(detail)
+    assert sum(len(d["payments"]) for d in details) == 1, \
+        "la clé a été honorée deux fois"
+    winner = next(d for d in details if d["payments"])
+    loser = next(d for d in details if not d["payments"])
+    assert winner["status"] == "confirmed" and len(winner["tickets"]) == 1
+    # L'accès émis porte les informations de sa séance (snapshot +
+    # relecture identiques — AUDIT-007).
+    sess_access = winner["tickets"][0]["accesses"][0]
+    assert sess_access["session_id"] == ids["session_pay"]
+    assert sess_access["session_start"] is not None
+    assert sess_access["session_event_title"] == \
+        "Concurrence Théâtre (test)"
+    assert loser["status"] == "pending" and loser["tickets"] == []
+    print("=> OK : 201 + 409 sur commandes à séance, aucun état partiel")
 
     print("\nConcurrence démontrée : anti-surbooking, anti double-scan, "
           "idempotence des paiements.")

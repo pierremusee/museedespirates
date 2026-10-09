@@ -17,30 +17,41 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import selectinload
 
 from app.models import (
     ComponentType,
     PaymentMethod,
     PaymentTransaction,
     ProductComponent,
+    Reservation,
     ReservationStatus,
     SalesChannel,
+    Session,
     Ticket,
+    TicketAccess,
 )
 from app.schemas.reservation import (
     PaymentCreate,
     ReservationCreate,
     ReservationItemCreate,
+    TicketRead,
 )
 from app.services.reservation_service import (
     add_payment,
     cancel_reservation,
     create_reservation,
 )
+from tests.conftest import TEST_DATABASE_URL
 from tests.factories import MUSEUM_TZ
 
 
@@ -551,3 +562,224 @@ async def test_echec_emission_ne_laisse_aucun_etat_partiel(db, catalog):
         await add_payment(db, resa.id, pay("10.00", key=key))
     assert e2.value.status_code == 409
     await db.rollback()
+
+
+# --- Snapshot de paiement : cohérence avec la relecture (AUDIT-007) ------
+#
+# Le `response` JSONB est figé à l'opération initiale : si les accès émis
+# n'ont pas leur relation `session` peuplée à la sérialisation, le
+# snapshot conserve session_start/session_event_title à null à vie —
+# et le rejeu propage le défaut.
+
+
+async def test_snapshot_paiement_coherent_avec_relecture(db, catalog):
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="adult",
+                session_id=catalog.session.id,
+            )
+        ),
+    )
+    key = uuid.uuid4()
+    first = await add_payment(db, resa.id, pay("10.00", key=key))
+    snap = first.result["tickets"][0]["accesses"][0]
+    assert snap["session_id"] == str(catalog.session.id)
+    assert snap["session_start"] is not None
+    assert snap["session_event_title"] == "Théâtre (pytest)"
+
+    rid = resa.id  # capturé avant expiration (lazy-load interdit)
+    db.expire_all()
+    # Même graphe eager que GET /reservations/{id}, mêmes schémas de
+    # sérialisation : la relecture doit donner les mêmes champs.
+    reread = (
+        await db.execute(
+            select(Reservation)
+            .options(
+                selectinload(Reservation.tickets)
+                .selectinload(Ticket.accesses)
+                .selectinload(TicketAccess.session)
+                .selectinload(Session.event)
+            )
+            .where(Reservation.id == rid)
+        )
+    ).scalar_one()
+    fresh = TicketRead.model_validate(reread.tickets[0]).model_dump(
+        mode="json"
+    )
+    assert fresh["accesses"][0]["session_start"] == snap["session_start"]
+    assert (
+        fresh["accesses"][0]["session_event_title"]
+        == snap["session_event_title"]
+    )
+
+    # Le rejeu restitue le snapshot initial correctement renseigné.
+    replay = await add_payment(db, rid, pay("10.00", key=key))
+    assert replay.replayed
+    assert replay.result == first.result
+
+
+# --- Collision de clé : récupération après IntegrityError (AUDIT-001) ----
+#
+# L'index unique sur la clé est le filet ultime des courses
+# inter-réservations (le FOR UPDATE ne sérialise que la même commande).
+# La course réelle reste démontrée par scripts/test_concurrency.py ; les
+# tests ci-dessous exercent les branches de récupération de façon
+# déterministe : un « gagnant » commité par une autre connexion simule
+# la transaction concurrente qui a validé entre le lookup et l'INSERT.
+
+
+@pytest_asyncio.fixture
+async def external_engine():
+    """Engine hors transaction de test : les commits y sont réellement
+    visibles par la session `db` (READ COMMITTED) — permet de simuler
+    une transaction concurrente. statement_timeout court : une attente
+    d'insertion spéculative PostgreSQL (version défectueuse qui flushe
+    la clé hors du périmètre de récupération) échoue au lieu de
+    bloquer indéfiniment."""
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={
+            "server_settings": {"statement_timeout": "5000"}
+        },
+    )
+    yield engine
+    await engine.dispose()
+
+
+async def _commit_winner(engine, key: uuid.UUID) -> uuid.UUID:
+    """Commit, hors transaction de test, une réservation + un
+    encaissement portant `key` — l'opération « gagnante » d'une course
+    inter-réservations."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as db2:
+        resa_b = Reservation(
+            customer_email="gagnant@pirates.fr",
+            total_price=Decimal("10.00"),
+            sales_channel=SalesChannel.POS,
+        )
+        db2.add(resa_b)
+        db2.add(
+            PaymentTransaction(
+                reservation=resa_b,
+                method=PaymentMethod.CASH,
+                amount=Decimal("5.00"),
+                applied_amount=Decimal("5.00"),
+                idempotency_key=key,
+            )
+        )
+        await db2.commit()
+        return resa_b.id
+
+
+async def _delete_committed(engine, reservation_id: uuid.UUID) -> None:
+    """Lignes commitées hors de la transaction de test — le rollback
+    final ne les voit pas, nettoyage explicite."""
+    async with engine.connect() as conn:
+        await conn.execute(
+            delete(PaymentTransaction).where(
+                PaymentTransaction.reservation_id == reservation_id
+            )
+        )
+        await conn.execute(
+            delete(Reservation).where(Reservation.id == reservation_id)
+        )
+        await conn.commit()
+
+
+async def _resa_a_seance(db, catalog):
+    """Commande POS à séance dont l'encaissement soldait le compte :
+    _emit_tickets est traversé — là où l'autoflush laissait échapper
+    l'IntegrityError avant la correction (500 au lieu de 409)."""
+    return await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="adult",
+                session_id=catalog.session.id,
+            ),
+            channel=SalesChannel.POS,
+        ),
+    )
+
+
+async def test_collision_cle_au_flush_recuperee_409(
+    db, catalog, monkeypatch, external_engine
+):
+    # La même clé est commitée par un concurrent pendant notre flush :
+    # IntegrityError sur l'index unique → rollback → relecture de
+    # l'opération gagnante → 409 (empreinte différente), et aucun état
+    # partiel côté perdant.
+    resa = await _resa_a_seance(db, catalog)
+    key = uuid.uuid4()
+    winner_resa_id: uuid.UUID | None = None
+    injected = False
+    real_flush = db.flush
+
+    async def racing_flush(*args, **kwargs):
+        nonlocal injected, winner_resa_id
+        if not injected:
+            injected = True
+            winner_resa_id = await _commit_winner(external_engine, key)
+        return await real_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db, "flush", racing_flush)
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await add_payment(
+                db, resa.id, pay("10.00", PaymentMethod.CASH, key=key)
+            )
+        assert exc.value.status_code == 409
+    finally:
+        if winner_resa_id is not None:
+            await _delete_committed(external_engine, winner_resa_id)
+
+    # Aucun état partiel : la tentative perdante est intégralement
+    # rollbackée — ni paiement, ni billet, statut inchangé.
+    await db.refresh(resa)
+    assert resa.status == ReservationStatus.PENDING
+    assert await _payment_count(db, resa.id) == 0
+    assert await _ticket_count(db, resa.id) == 0
+
+
+async def test_cle_commitee_pendant_le_verrou_recuperee_409(
+    db, catalog, monkeypatch, external_engine
+):
+    # Course vue du côté « second lookup sous FOR UPDATE » : la clé est
+    # commitée entre le chemin rapide et l'acquisition du verrou — le
+    # rejeu de l'opération gagnante (ici 409, autre réservation) doit
+    # primer sur la garde « déjà soldée ».
+    resa = await _resa_a_seance(db, catalog)
+    key = uuid.uuid4()
+    winner_resa_id: uuid.UUID | None = None
+    injected = False
+    real_execute = db.execute
+
+    async def racing_execute(statement, *args, **kwargs):
+        # Le concurrent commit juste avant la fin du verrou FOR UPDATE :
+        # le second lookup de la clé le voit alors en base.
+        nonlocal injected, winner_resa_id
+        if not injected and any(
+            d.get("entity") is Reservation
+            for d in getattr(statement, "column_descriptions", ())
+        ):
+            injected = True
+            winner_resa_id = await _commit_winner(external_engine, key)
+        return await real_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db, "execute", racing_execute)
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await add_payment(
+                db, resa.id, pay("10.00", PaymentMethod.CASH, key=key)
+            )
+        assert exc.value.status_code == 409
+    finally:
+        if winner_resa_id is not None:
+            await _delete_committed(external_engine, winner_resa_id)
+
+    await db.refresh(resa)
+    assert resa.status == ReservationStatus.PENDING
+    assert await _payment_count(db, resa.id) == 0
+    assert await _ticket_count(db, resa.id) == 0

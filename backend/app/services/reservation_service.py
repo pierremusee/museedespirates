@@ -221,6 +221,12 @@ async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
                     TicketAccess(
                         access_type=SESSION_TICKET_TYPE[component_type],
                         session_id=session.id,
+                        # Relation peuplée explicitement : les propriétés
+                        # de sérialisation (session_start,
+                        # session_event_title) lisent l'objet chargé —
+                        # la séance et son événement le sont déjà,
+                        # aucune requête supplémentaire.
+                        session=session,
                         event_id=session.event_id,
                         valid_date=_session_day(session),
                     )
@@ -801,16 +807,26 @@ async def add_payment(
     reservation.payments.append(payment)
 
     new_due = remaining - applied
-    if new_due == 0:
-        reservation.status = ReservationStatus.CONFIRMED
-        await _emit_tickets(db, reservation)
-
-    db.add(payment)
     try:
-        # Flush requis avant la sérialisation : ids et created_at sont
+        # INSERT contrôlé de la tranche AVANT l'émission des billets :
+        # c'est ici que l'INSERT rencontre l'index unique sur la clé —
+        # la course se règle donc dès ce flush, dans le périmètre de
+        # récupération. Sans flush explicite, les lectures de
+        # _emit_tickets déclencheraient un autoflush hors de ce
+        # périmètre (le paiement est déjà pending via l'append) : la
+        # collision de clé remontait en 500 au lieu de 409 — le cas
+        # n'apparaît que sur une commande à séance soldée par
+        # l'encaissement.
+        db.add(payment)
+        await db.flush()
+
+        if new_due == 0:
+            reservation.status = ReservationStatus.CONFIRMED
+            await _emit_tickets(db, reservation)
+
+        # Re-flush avant la sérialisation : ids et created_at sont
         # générés en base (server_default) comme les ids des billets
-        # émis. C'est aussi ici que l'INSERT rencontre l'index unique
-        # sur la clé — la course se règle donc dès le flush.
+        # émis.
         await db.flush()
         snapshot = PaymentResult(
             payment=payment,

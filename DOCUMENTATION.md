@@ -102,7 +102,10 @@ musee/
 │       ├── factories.py              #   rollbackée par test)
 │       ├── test_pricing.py
 │       ├── test_reservation_rules.py
-│       └── test_reservation_flow.py
+│       ├── test_reservation_flow.py
+│       ├── test_payments.py
+│       ├── test_scan.py
+│       └── test_purge.py
 └── frontend/
     ├── app/
     │   ├── page.tsx                  # accueil
@@ -272,14 +275,23 @@ Mécanique dans `add_payment` : lookup de la clé avant le verrou
 (chemin rapide), `SELECT ... FOR UPDATE` sur la réservation, **second
 lookup sous le verrou** (un concurrent de même clé a pu commiter
 entre-temps — son rejeu prime sur la garde « déjà soldée »), puis
-imputation + émission + **snapshot sérialisé dans la même transaction**
-(`flush` avant `model_dump` pour disposer des ids/`created_at`). La
-contrainte `uq_payment_transactions_idempotency_key` reste la garantie
-ultime : une course entre deux réservations sur la même clé provoque
-une `IntegrityError` → rollback → relecture → rejeu ou 409 selon
+imputation : **INSERT contrôlé de la tranche dès le flush explicite,
+avant l'émission des billets** — sans cela, les lectures de
+`_emit_tickets` déclencheraient un autoflush hors du périmètre de
+récupération et la collision remonterait en 500 au lieu de 409 (cas
+d'une commande à séance soldée par l'encaissement — corrigé
+2026-10-09). Émission + **snapshot sérialisé dans la même transaction**
+(`flush` avant `model_dump` pour disposer des ids/`created_at` ; les
+accès émis portent leur relation `session` peuplée — les champs
+`session_start`/`session_event_title` du JSONB sont identiques à
+ceux d'une relecture `GET`). La contrainte
+`uq_payment_transactions_idempotency_key` reste la garantie ultime :
+une course entre deux réservations sur la même clé provoque une
+`IntegrityError` → rollback → relecture → rejeu ou 409 selon
 l'empreinte. **Démontré sous concurrence** (`test_concurrency.py` :
 8 paiements simultanés même clé → 1×201 + 7×200, 1 transaction ;
-même clé sur 2 réservations → 201 + 409).
+même clé sur 2 réservations → 201 + 409, y compris sur commandes à
+séance soldées).
 
 **Cycle de vie client** : clé `crypto.randomUUID()` créée au
 déclenchement d'une nouvelle opération, conservée tant que l'issue est
@@ -443,7 +455,7 @@ psql postgresql://postgres:password@localhost:5432/postgres \
   -c "CREATE DATABASE musee_test"
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/musee_test \
   alembic upgrade head
-pytest                       # 114 tests métier — isolation : transaction
+pytest                       # 118 tests métier — isolation : transaction
                              # rollbackée par test, jamais de seed nécessaire
 pytest --cov=app --cov-report=term-missing --cov-report=xml
                              # coverage (plancher 65 % — pyproject.toml)
@@ -497,11 +509,16 @@ la course que le FOR UPDATE ne sérialise pas) ; **même clé, contenus
 différents en concurrence → 201 + 409, une seule empreinte honorée** ;
 **2 tranches ANCV concurrentes proches du solde → la seconde plafonnée
 au reste (excédent perdu, DFC n°7), total imputé exact** ; **4 tranches
-cash concurrentes à clés distinctes → 4 enregistrements, solde exact**.
-Seed idempotent, relançable à volonté.
+cash concurrentes à clés distinctes → 4 enregistrements, solde exact** ;
+**même clé sur 2 réservations à séance soldées → 201 + 409, un seul
+encaissement, perdant sans état partiel** (régression couverte :
+l'autoflush de `_emit_tickets` laissait échapper l'IntegrityError en
+500) et **l'accès émis porte `session_start`/`session_event_title`
+renseignés** (cohérents avec la relecture GET). Seed idempotent,
+relançable à volonté.
 
-**Suite métier pytest** (2026-10-09) : `backend/tests/` — 115 tests en
-~25 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
+**Suite métier pytest** (2026-10-09) : `backend/tests/` — 118 tests en
+~21 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
 `commit()` internes des services libèrent un savepoint, le rollback final
@@ -527,7 +544,7 @@ dîner-spectacle (aucun produit ne l'émet). `test_payments.py` :
 garde-fous d'encaissement (404, commande soldée/expirée, chèque réservé
 aux groupes dans les deux sens, CB/chèque au-delà du solde, ANCV
 partiel au POS), intégrité « commande → paiement » — produit modifié
-ou séance supprimée entre-temps → **409** — et **idempotence** (15 tests :
+ou séance supprimée entre-temps → **409** — et **idempotence** (18 tests :
 rejeu même clé sans doublon, snapshot historique restitué après un
 paiement ultérieur ou une annulation, rejeu après expiration avec
 encaissement toujours tracé (`payments` + `applied_amount` inchangés),
@@ -537,7 +554,12 @@ clé non consommée par un échec 4xx, rejeu web sans double émission,
 atomicité — un échec en cours de transaction ne laisse aucun état
 partiel, snapshot relu depuis la colonne JSONB après `expire_all`,
 aucune duplication de billets en base au rejeu, invariant « canal web
-⇒ aucun encaissement partiel possible » qui fonde l'abandon local) ; `test_reservation_rules.py`
+⇒ aucun encaissement partiel possible » qui fonde l'abandon local,
+**snapshot figé cohérent avec la relecture GET** — `session_start`/
+`session_event_title` renseignés, rejeu fidèle — et **branches de
+récupération de course exercées** par injection d'un commit concurrent
+depuis une seconde connexion : `IntegrityError` au flush et clé
+commitée pendant le `FOR UPDATE` → 409, perdant sans état partiel) ; `test_reservation_rules.py`
 couvre en plus catégorie manquante, incohérence `visit_date`/séance du
 Pass et catalogue corrompu (produit sans droit, composant musée sans
 événement, événement inactif, groupe sans tarif) ; `test_pricing.py`
@@ -547,10 +569,12 @@ libère la jauge, `pending` récent / `confirmed` / `cancelled` anciens
 conservés, sélectivité sur séance partagée, restitution multi-items et
 multi-séances, séance supprimée sans crash, **borne exacte** du cutoff
 (`<` strict paramétré ±1 s).
-Coverage `pytest-cov` — `app/` **81 %**, `app/services/` **~99,5 %**
-(pricing 100 %, reservation_service 99 % — seule ligne manquante :
-garde d'idempotence 172, défensive — ticket_service 98 % ; les
-`api/*` à 0 % sont exercées par l'E2E dans un autre
+Coverage `pytest-cov` — `app/` **82 %**, `app/services/` **~99,5 %**
+(pricing 100 %, reservation_service 99 % — 2 lignes défensives
+documentées : garde « billets déjà émis » (175) et `raise` quand
+l'`IntegrityError` ne relue aucune opération gagnante (857) ; les
+branches de récupération de course sont elles exercées — ticket_service
+98 % ; les `api/*` à 0 % sont exercées par l'E2E dans un autre
 processus) ; plancher `fail_under=65`. Coverage frontend via
 `@vitest/coverage-v8` — baseline **88 %** (cart.ts 87 %, pending-payment.ts 95 %, plancher 80 %
 dans `vitest.config.ts`). Rapports (`.coverage`, `coverage.xml`,
@@ -787,11 +811,25 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   incertaine, restauration de la commande après rechargement ; reprise
   web `sessionStorage` sans recréer de panier (`pending-payment.ts`),
   formulaire gelé, échec de vérification ou statut non reconnu =
-  blocage (jamais abandon). 115 tests pytest + rejeu E2E + concurrence
-  démontrée (7 scénarios) ; vitest (58 tests) couvre les décisions de
+  blocage (jamais abandon). 118 tests pytest + rejeu E2E + concurrence
+  démontrée (8 scénarios, dont course de clé sur commandes à séance
+  soldées) ; vitest (58 tests) couvre les décisions de
   contrôle du flux **et** le flux « GET + décision » sous pannes
   injectées (réseau, 5xx, JSON mal formé, statut non reconnu) —
   composants React non testés (pas de harness), limites en §12.
+- ✅ **Audit idempotence — corrections ciblées** (2026-10-09, PR #4) :
+  collision de clé sur commande à séance soldée — l'`IntegrityError`
+  pouvait surgir d'un autoflush pendant `_emit_tickets`, hors du
+  périmètre de récupération (500 au lieu de 409) → INSERT contrôlé du
+  paiement dès le flush explicite, avant l'émission ; snapshot
+  `response` privé des champs de séance — `TicketAccess` créé avec
+  `session_id` seul, relation `session` non peuplée → `session_start`/
+  `session_event_title` figés à `null` dans le JSONB et propagés au
+  rejeu → relation peuplée à l'émission (séance et événement déjà
+  chargés, aucune requête en plus). Les deux branches de récupération
+  (IntegrityError au flush, clé commitée pendant le `FOR UPDATE`) sont
+  exercées par injection d'un commit concurrent ; la course réelle est
+  démontrée E2E sur le nouveau scénario de `test_concurrency.py`.
 
 ### Backlog (feuille de route non figée)
 
