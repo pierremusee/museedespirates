@@ -440,7 +440,11 @@ async def main() -> None:
                    "visit_date": wrong_day, "session_id": ids["s1"]}],
     }), 400, "test 3 — visit_date ≠ jour de la séance")
 
-    today = str(date.today())
+    # Jour de référence = jour civil Paris (règle métier de validité),
+    # pas la date UTC du runner — entre 0h et 2h Paris (été), les deux
+    # divergent et le billet seedé « aujourd'hui » arrivait daté de
+    # la veille → scan refusé (flake CI).
+    today = str(datetime.now(MUSEUM_TZ).date())
     print("\nTest 4a — billet Musée (open_ticket) valable aujourd'hui + profil gratuit -4 ans :")
     resa4 = expect(post(f"{BASE_URL}/reservations", {
         "customer_email": "anne.bonny@revenge.fr",
@@ -724,8 +728,8 @@ async def main() -> None:
     # serveur (Session.is_expired) — le POS grise sans dupliquer la règle.
     # Les trois jours sont interrogés : +3 h peut tomber sur le
     # lendemain en fin de journée, et -1 h sur la veille après minuit.
-    yesterday = str(date.today() - timedelta(days=1))
-    tomorrow = str(date.today() + timedelta(days=1))
+    yesterday = str(datetime.now(MUSEUM_TZ).date() - timedelta(days=1))
+    tomorrow = str(datetime.now(MUSEUM_TZ).date() + timedelta(days=1))
     body = [
         e
         for day in (yesterday, today, tomorrow)
