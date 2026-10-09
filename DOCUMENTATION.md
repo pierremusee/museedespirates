@@ -304,6 +304,14 @@ est gelé (`fieldset disabled`) avec le montant réel de l'opération, pas
 l'estimation. Une opération en attente sur un autre produit est résolue
 par `GET /reservations/{id}` avant écrasement (confirmée → `/succes`,
 commande morte → abandonnée à la purge, indéterminée → blocage).
+**« Abandonner » est purement local** (oubli de la clé `sessionStorage`,
+aucune mutation serveur) — un éventuel encaissement resterait tracé sur
+la réservation ; l'abandon d'un `pending` est sans risque car le canal
+web n'admet que la CB au montant exact : une réservation web `pending`
+ne peut porter aucun encaissement (invariant prouvé par
+`test_canal_web_ne_peut_pas_etre_partiellement_paye`). À la caisse, un
+`pending` porteur d'acomptes n'est jamais « abandonné » mais **repris**
+avec la même clé (`posResolution → resume`).
 
 Caisse : verrou synchrone `paymentInFlight` (ref — le state `busy`
 laisse passer un double clic dans le même batch React) ; tant qu'une
@@ -455,8 +463,11 @@ npx tsc --noEmit
 cohérence visit_date, scans (musée/séance/double-scan/autre jour),
 surbooking séquentiel, multi-paiements POS (cash+ANCV, chèque réservé
 groupes), **idempotence E2E** (rejeu même clé → `200` + snapshot
-identique, même clé + montant/méthode divergents → `409`, et le test
-12 re-vérifie `len(payments) == 1`), seuil groupe ≥ 8, `extra_show`
+identique, même clé + montant/méthode divergents → `409`, **rejeu de
+la clé d'un acompte après annulation → `200` + snapshot de l'opération
+initiale, aucune duplication ni changement de statut** — le scénario
+« réponse perdue puis commande annulée » du guichet, test 11b-bis,
+et le test 12 re-vérifie `len(payments) == 1`), seuil groupe ≥ 8, `extra_show`
 fusionné, purge des paniers
 expirés, fenêtre de vente des séances (tolérance vendue+scannée, expirée
 refusée), **annulation guichet** (restitution de jauge prouvée
@@ -489,7 +500,7 @@ au reste (excédent perdu, DFC n°7), total imputé exact** ; **4 tranches
 cash concurrentes à clés distinctes → 4 enregistrements, solde exact**.
 Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-09) : `backend/tests/` — 114 tests en
+**Suite métier pytest** (2026-10-09) : `backend/tests/` — 115 tests en
 ~25 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
@@ -516,11 +527,17 @@ dîner-spectacle (aucun produit ne l'émet). `test_payments.py` :
 garde-fous d'encaissement (404, commande soldée/expirée, chèque réservé
 aux groupes dans les deux sens, CB/chèque au-delà du solde, ANCV
 partiel au POS), intégrité « commande → paiement » — produit modifié
-ou séance supprimée entre-temps → **409** — et **idempotence** (9 tests :
+ou séance supprimée entre-temps → **409** — et **idempotence** (15 tests :
 rejeu même clé sans doublon, snapshot historique restitué après un
-paiement ultérieur ou une annulation, 409 sur montant/méthode/
+paiement ultérieur ou une annulation, rejeu après expiration avec
+encaissement toujours tracé (`payments` + `applied_amount` inchangés),
+409 sur montant/méthode/
 réservation divergents, multi-paiements à clés distinctes préservés,
-clé non consommée par un échec 4xx, rejeu web sans double émission) ; `test_reservation_rules.py`
+clé non consommée par un échec 4xx, rejeu web sans double émission,
+atomicité — un échec en cours de transaction ne laisse aucun état
+partiel, snapshot relu depuis la colonne JSONB après `expire_all`,
+aucune duplication de billets en base au rejeu, invariant « canal web
+⇒ aucun encaissement partiel possible » qui fonde l'abandon local) ; `test_reservation_rules.py`
 couvre en plus catégorie manquante, incohérence `visit_date`/séance du
 Pass et catalogue corrompu (produit sans droit, composant musée sans
 événement, événement inactif, groupe sans tarif) ; `test_pricing.py`
@@ -770,7 +787,7 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   incertaine, restauration de la commande après rechargement ; reprise
   web `sessionStorage` sans recréer de panier (`pending-payment.ts`),
   formulaire gelé, échec de vérification ou statut non reconnu =
-  blocage (jamais abandon). 114 tests pytest + rejeu E2E + concurrence
+  blocage (jamais abandon). 115 tests pytest + rejeu E2E + concurrence
   démontrée (7 scénarios) ; vitest (58 tests) couvre les décisions de
   contrôle du flux **et** le flux « GET + décision » sous pannes
   injectées (réseau, 5xx, JSON mal formé, statut non reconnu) —

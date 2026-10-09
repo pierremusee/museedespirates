@@ -755,13 +755,30 @@ async def main() -> None:
         "items": [{"product_code": "museum_entry", "category": "adult",
                    "visit_date": today}],
     }), 201, "test 11b — création musée")
-    expect(pay(resa_p["id"], "cash", "5.00"), 201, "test 11b — acompte espèces")
+    key_p = str(uuid.uuid4())
+    paid_p = expect(
+        pay(resa_p["id"], "cash", "5.00", key=key_p), 201,
+        "test 11b — acompte espèces")
     cancelled_p = expect(
         post(f"{BASE_URL}/reservations/{resa_p['id']}/cancel"),
         200, "test 11b — annulation après acompte")
     assert len(cancelled_p["payments"]) == 1
     assert Decimal(cancelled_p["payments"][0]["amount"]) == Decimal("5.00")
     print("=> OK : encaissement conservé sur commande annulée")
+
+    # 11b-bis — réponse perdue puis annulation (scénario guichet) : le
+    # rejeu HTTP retrouve la tranche initiale (200 + snapshot identique),
+    # sans second encaissement ni changement de statut.
+    replay_p = expect(
+        pay(resa_p["id"], "cash", "5.00", key=key_p), 200,
+        "test 11b — rejeu de l'acompte après annulation")
+    assert replay_p == paid_p, \
+        "le rejeu doit restituer le snapshot de l'opération initiale"
+    s, detail_p = get(f"{BASE_URL}/reservations/{resa_p['id']}")
+    assert s == 200 and len(detail_p["payments"]) == 1
+    assert Decimal(detail_p["paid_amount"]) == Decimal("5.00")
+    assert detail_p["status"] == "cancelled"
+    print("=> OK : rejeu après annulation — snapshot, aucune duplication")
 
     # Cas d'erreur : payée/confirmée/annulée/inconnue → rejet.
     expect(pay(resa_p["id"], "cash", "7.00"), 400,

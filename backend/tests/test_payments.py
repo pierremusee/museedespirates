@@ -444,6 +444,27 @@ async def test_snapshot_persiste_et_rejoue_apres_relecture(db, catalog):
     assert replay.result == first.result
 
 
+async def test_canal_web_ne_peut_pas_etre_partiellement_paye(
+    db, catalog, today
+):
+    # Invariant derrière l'abandon côté billetterie : une réservation
+    # web « pending » ne peut porter AUCUN encaissement — le canal exige
+    # CB au montant exact (DFC n°7). Abandonner une opération pending
+    # (oubli local de la clé) ne peut donc pas égarer un paiement.
+    resa = await create_reservation(
+        db, order(item("museum_entry", category="adult", visit_date=today))
+    )
+    for method in (PaymentMethod.CASH, PaymentMethod.ANCV,
+                   PaymentMethod.CHECK):
+        with pytest.raises(HTTPException) as e:
+            await add_payment(db, resa.id, pay("12.00", method))
+        assert e.value.status_code == 400
+    with pytest.raises(HTTPException):
+        await add_payment(db, resa.id, pay("5.00"))  # CB partiel
+    assert await _payment_count(db, resa.id) == 0
+    assert resa.status == ReservationStatus.PENDING
+
+
 async def test_rejeu_apres_expiration_restitue_snapshot(db, catalog):
     # Même garantie qu'après annulation : la purge TTL a pu expirer la
     # commande entre-temps, le rejeu restitue la réponse initiale.
@@ -461,6 +482,16 @@ async def test_rejeu_apres_expiration_restitue_snapshot(db, catalog):
     assert replay.result == first.result
     assert replay.result["reservation_status"] == "pending"
     assert replay.reservation.status == ReservationStatus.EXPIRED
+    # La trace de l'encaissement persiste : la purge ne l'efface pas.
+    assert await _payment_count(db, resa.id) == 1
+    applied = (
+        await db.execute(
+            select(func.sum(PaymentTransaction.applied_amount)).where(
+                PaymentTransaction.reservation_id == resa.id
+            )
+        )
+    ).scalar_one()
+    assert applied == Decimal("5.00")
 
 
 async def test_encaissement_reste_trace_apres_annulation(db, catalog):

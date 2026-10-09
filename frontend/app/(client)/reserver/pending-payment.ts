@@ -87,6 +87,11 @@ export function previousOutcome(
   // et doit être conservée — jamais assimilée à un abandon.
   if (!httpOk || status === null) return "unknown";
   if (status === "confirmed") return "conclude";
+  // Abandon = décision purement locale (oubli de la clé + nouvelle
+  // opération autorisée) — rien n'est supprimé côté serveur : un
+  // éventuel encaissement reste tracé sur la réservation. Sûr ici car
+  // le canal web n'admet que le paiement CB intégral : une réservation
+  // « pending » ne peut donc pas porter de paiement partiel.
   if (["pending", "cancelled", "expired"].includes(status))
     return "abandon";
   return "unknown";
