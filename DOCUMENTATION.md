@@ -1,6 +1,6 @@
 # Musée des Pirates — Documentation du projet
 
-> **Dernière mise à jour : 2026-10-09**
+> **Dernière mise à jour : 2026-10-10**
 > Ce document est la référence vivante du projet. Il doit être mis à jour à
 > chaque évolution (voir §13 — Maintenance). Cible : `OBJECTIFS.md` ;
 > pilotage : `PILOTAGE.md`. La mémoire Honcho (peer `user-default-dev`) est
@@ -346,13 +346,24 @@ avec bouton « Revérifier »).
 
 Une commande couvre au plus **120 personnes**
 (`MAX_PERSONS_PER_RESERVATION` — repères : jauge de séance seedée ~80,
-« capacité de 120 » de la spec OBJECTIFS §17) et **10 lignes**
-(`MAX_ITEMS_PER_RESERVATION` — le catalogue actif en compte moins).
-Une tranche d'encaissement est plafonnée à **50 000 €**
+« capacité de 120 » de la spec OBJECTIFS §17) et **120 lignes**
+(`MAX_ITEMS_PER_RESERVATION` — les interfaces émettent **1 ligne par
+personne individuelle**, la borne lignes ne peut donc pas être
+inférieure au plafond de personnes). Une tranche d'encaissement est
+plafonnée à **50 000 €**
 (`MAX_PAYMENT_AMOUNT`, sous la capacité `Numeric(10,2)` =
 99 999 999,99 € — dépassement PostgreSQL impossible).
 `customer_email` est déjà borné à 254 caractères par `EmailStr`
 (RFC 5321) — sous la colonne `String(320)`.
+
+**Comptage des personnes** : seules les lignes de produits de base
+comptent — un individuel = 1, une famille = 4 + `extra_children`, un
+groupe = `group_size`. Les produits `is_addon` (séance
+supplémentaire…) **ne comptent pas** : la règle de couverture impose
+déjà qu'ils portent des accès pour des personnes couvertes par un
+produit de base de la même commande — ce sont des accès
+supplémentaires, pas des personnes en plus. La capacité des séances
+reste décomptée par accès réel (`_session_slots`), indépendamment.
 
 Champ hors borne → **422** (Pydantic) ; total de personnes dépassé en
 agrégat par des lignes individuellement valides → **400** en service,
@@ -476,7 +487,7 @@ psql postgresql://postgres:password@localhost:5432/postgres \
   -c "CREATE DATABASE musee_test"
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/musee_test \
   alembic upgrade head
-pytest                       # 131 tests métier — isolation : transaction
+pytest                       # 138 tests métier — isolation : transaction
                              # rollbackée par test, jamais de seed nécessaire
 pytest --cov=app --cov-report=term-missing --cov-report=xml
                              # coverage (plancher 65 % — pyproject.toml)
@@ -487,7 +498,9 @@ npm run lint   # eslint
 npm test       # vitest — logique panier caisse (cart.test.ts) +
                # reprise paiement web (pending-payment.test.ts : flux
                # GET+décision sous panne injectée) + reprise POS
-               # (pos-pending.test.ts : idem au rechargement caisse)
+               # (pos-pending.test.ts : idem au rechargement caisse) +
+               # formatage des erreurs API (utils.test.ts :
+               # apiErrorDetail — detail texte vs tableau Pydantic 422)
 npm test -- --coverage   # + coverage v8 (plancher 80 %, vitest.config.ts)
 npx tsc --noEmit
 ```
@@ -510,7 +523,11 @@ fonctionnellement sur séance cap-1, encaissements conservés, rejets
 `/reservations/{id}` (graphe complet relu + 404) — smoke HTTP qui
 garantit la sérialisation des `response_model` sans lazy-loading
 (`MissingGreenlet`), **bornes d'entrée** (test 13 : champs hors borne
-→ 422 HTTP, agrégat > 120 personnes → 400, borne 120 exacte acceptée).
+→ 422 HTTP — groupe de 121, 121 lignes, email > 254 car., tranche
+> 50 000 €, montant débordant `Numeric` — 11 billets individuels
+acceptés, agrégat > 120 personnes → 400, borne 120 exacte acceptée,
+12 personnes + 12 séances supplémentaires acceptées sans double
+comptage).
 **Depuis 2026-10-08, chaque appel est une assertion bloquante**
 (helper `expect`) : les rejets autrefois affichés sans vérification et les
 gardes `if status == 201:` qui sautaient les assertions en cas d'échec ont
@@ -547,7 +564,7 @@ run ; les deux branches sont exercées de façon **déterministe** par
 `test_payments.py` (commit concurrent injecté depuis une seconde
 connexion). Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-09) : `backend/tests/` — 131 tests en
+**Suite métier pytest** (2026-10-10) : `backend/tests/` — 138 tests en
 ~21 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
@@ -600,10 +617,17 @@ couvre les tarifs famille et groupe, basse et haute saison.
 `test_input_bounds.py` : bornes d'entrée — montant à la borne (50 000 €
 accepté), juste au-dessus et valeur extrême rejetés en `ValidationError`
 (422 en HTTP), `group_size`/`extra_children` au plafond et au-delà,
-dépassement de la capacité `Integer` rejeté avant insertion, 11 lignes
-refusées / 10 acceptées, email > 320 car. refusé, plafond agrégé de 120
-personnes vérifié en service (400) et borne incluse (groupe de 120
-créé).
+dépassement de la capacité `Integer` rejeté avant insertion, 121 lignes
+refusées / 120 acceptées / 11 billets individuels créés, email valide
+de 254 car. accepté et 255 rejeté **pour sa longueur** (syntaxe valide
+dans les deux cas — la règle de longueur est isolée), plafond agrégé
+de 120 personnes vérifié en service (400) et borne incluse (groupe de
+120 créé), **comptage des personnes sans double comptage des add-ons**
+(12 billets + 12 séances supp. = 12 personnes ; 60+60 lignes au double
+plafond ; add-on **groupe** de 60 couvert par un groupe de 70 — cas où
+le double comptage dépasserait réellement le plafond, régression
+prouvée par suppression de la garde) et add-ons ne masquant pas un
+dépassement des lignes de base.
 `test_purge.py` : TTL 15 min sous horloge figée — `pending` expiré
 libère la jauge, `pending` récent / `confirmed` / `cancelled` anciens
 conservés, sélectivité sur séance partagée, restitution multi-items et
@@ -853,7 +877,7 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   formulaire gelé, échec de vérification ou statut non reconnu =
   blocage (jamais abandon). 118 tests pytest + rejeu E2E + concurrence
   démontrée (8 scénarios, dont course de clé sur commandes à séance
-  soldées) ; vitest (58 tests) couvre les décisions de
+  soldées) ; vitest (64 tests) couvre les décisions de
   contrôle du flux **et** le flux « GET + décision » sous pannes
   injectées (réseau, 5xx, JSON mal formé, statut non reconnu) —
   composants React non testés (pas de harness), limites en §12.
@@ -878,11 +902,24 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   produits sans jauge (`customer_email` était déjà borné à 254 car.
   par `EmailStr` < colonne 320). Bornes métier décidées :
   **120 personnes** par commande (spec §17, jauge seedée ~80),
-  **10 lignes**, **50 000 €** par tranche. Champs hors borne → 422 ;
-  agrégat de personnes > 120 → 400 en service
-  (`test_input_bounds.py` : 13 tests ; `test_booking.py` test 13 :
-  preuve HTTP). Limites restantes : borne par champ, pas de borne
-  temporelle ni de rate-limiting (hors périmètre M5 sécurité).
+  **120 lignes** (les interfaces émettent 1 ligne/personne — la
+  première version à 10 lignes bloquait 11 billets individuels),
+  **50 000 €** par tranche. Champs hors borne → 422 ; agrégat de
+  personnes > 120 → 400 en service. Revue indépendante (2026-10-10) :
+  **comptage des add-ons corrigé** — une séance supplémentaire porte
+  des accès pour des personnes déjà couvertes, elle ne double-compte
+  plus (le modèle permet un add-on groupe/famille : test dédié rendant
+  le double comptage observable, sinon inatteignable avec des add-ons
+  1 personne/ligne sous la borne de 120 lignes) ; **erreurs 422** —
+  `toast.error(body.detail)` recevait un tableau Pydantic → crash de
+  rendu React (« Objects are not valid as a React child ») sur la
+  caisse et le site, remplacé par `apiErrorDetail` (`lib/utils.ts`,
+  6 tests vitest : texte, tableau aplatit `loc`+`msg`, repli) ;
+  incohérence doc email corrigée (> 320 → la borne réelle est 254,
+  tests valides à 254/255). `test_input_bounds.py` : 20 tests ;
+  `test_booking.py` test 13 : preuve HTTP (dont 11 lignes acceptées).
+  Limites restantes : borne par champ, pas de borne temporelle ni de
+  rate-limiting (hors périmètre M5 sécurité).
 
 ### Backlog (feuille de route non figée)
 

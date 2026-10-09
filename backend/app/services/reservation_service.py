@@ -348,8 +348,13 @@ async def create_reservation(
         # Plafond agrégé : les bornes par champ (422) ne suffisent pas —
         # des lignes individuellement valides peuvent dépasser en somme
         # le maximum de personnes qu'une commande peut couvrir.
+        # Les produits `is_addon` ne comptent pas : chaque ligne add-on
+        # exige une personne couverte par un produit de base (règle de
+        # couverture ci-dessous) — c'est un accès supplémentaire pour
+        # une personne déjà comptée, pas une personne de plus.
         persons = _persons(item_in, product)
-        total_persons += len(persons)
+        if not product.is_addon:
+            total_persons += len(persons)
         if total_persons > MAX_PERSONS_PER_RESERVATION:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

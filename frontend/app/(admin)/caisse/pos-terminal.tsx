@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cn } from "@/lib/utils";
+import { apiErrorDetail, cn } from "@/lib/utils";
 import { TicketCard } from "@/components/ticket-card";
 import { PrintTicketsButton } from "@/components/print-tickets-button";
 import {
@@ -550,7 +550,7 @@ export function PosTerminal({
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(body.detail ?? `Erreur ${res.status} à la commande.`);
+        toast.error(apiErrorDetail(body, `Erreur ${res.status} à la commande.`));
         return;
       }
       setOrder({
@@ -644,7 +644,7 @@ export function PosTerminal({
         } catch {
           // Statut local conservé — l'erreur métier reste affichée.
         }
-        toast.error(body.detail ?? `Erreur ${res.status} au paiement.`);
+        toast.error(apiErrorDetail(body, `Erreur ${res.status} au paiement.`));
         return;
       }
       setPendingOp(null);
@@ -708,7 +708,7 @@ export function PosTerminal({
       );
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(body.detail ?? `Erreur ${res.status} à l'annulation.`);
+        toast.error(apiErrorDetail(body, `Erreur ${res.status} à l'annulation.`));
         return;
       }
       const refunded = order.paid;

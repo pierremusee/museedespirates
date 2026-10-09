@@ -722,15 +722,16 @@ async def main() -> None:
 
     # Contrat API pour les clients : `is_expired` est calculé côté
     # serveur (Session.is_expired) — le POS grise sans dupliquer la règle.
-    # (la séance +3 h peut tomber sur le lendemain en fin de journée)
+    # Les trois jours sont interrogés : +3 h peut tomber sur le
+    # lendemain en fin de journée, et -1 h sur la veille après minuit.
+    yesterday = str(date.today() - timedelta(days=1))
     tomorrow = str(date.today() + timedelta(days=1))
     body = [
-        *json.loads(
-            urllib.request.urlopen(f"{BASE_URL}/events?date={today}").read()
-        ),
-        *json.loads(
-            urllib.request.urlopen(f"{BASE_URL}/events?date={tomorrow}").read()
-        ),
+        e
+        for day in (yesterday, today, tomorrow)
+        for e in json.loads(
+            urllib.request.urlopen(f"{BASE_URL}/events?date={day}").read()
+        )
     ]
     flags = {
         s["id"]: s["is_expired"]
@@ -867,12 +868,23 @@ async def main() -> None:
                    "visit_date": today}],
     })
     assert s == 422, f"groupe de 121 personnes accepté ({s})"
-    s, _ = post(f"{BASE_URL}/reservations", {
+    # 11 billets individuels = 11 lignes : doit passer (les interfaces
+    # émettent 1 item par personne — la borne lignes est au plafond
+    # de 120 personnes, pas en dessous).
+    s, resa11i = post(f"{BASE_URL}/reservations", {
         "customer_email": "capitaine@bornes.fr",
         "items": [{"product_code": "museum_entry", "category": "adult",
                    "visit_date": today}] * 11,
     })
-    assert s == 422, f"commande de 11 lignes acceptée ({s})"
+    assert s == 201 and len(resa11i["items"]) == 11, (
+        f"11 billets individuels refusés ({s})"
+    )
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}] * 121,
+    })
+    assert s == 422, f"commande de 121 lignes acceptée ({s})"
     s, _ = post(f"{BASE_URL}/reservations", {
         "customer_email": "a" * 310 + "@pirates-tres-long.fr",
         "items": [{"product_code": "museum_entry", "category": "adult",
@@ -915,8 +927,23 @@ async def main() -> None:
     assert s == 400 and "120" in str(detail), (
         f"agrégat > 120 personnes accepté ({s})"
     )
+
+    # Séances supplémentaires = accès pour des personnes déjà
+    # comptées : 12 billets théâtre + 12 add-ons → 12 personnes.
+    items_show = [{"product_code": "theater_show", "category": "adult",
+                   "session_id": ids["s1"]}] * 12
+    items_extra = [{"product_code": "extra_show", "category": "adult",
+                    "session_id": ids["s2"]}] * 12
+    s, resa_x = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": items_show + items_extra,
+    })
+    assert s == 201 and len(resa_x["items"]) == 24, (
+        f"12 personnes + 12 séances supp. refusées ({s})"
+    )
     print("=> OK : 422 sur champs hors borne, 400 sur agrégat > 120 "
-          "personnes, borne 120 exacte acceptée")
+          "personnes, bornes exactes acceptées, add-ons non "
+          "double-comptés")
 
 
 async def run() -> None:

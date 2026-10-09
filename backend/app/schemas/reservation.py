@@ -16,15 +16,17 @@ from app.schemas.ticket import TicketAccessRead
 #   (repères : jauge de séance seedée ~80, « capacité de 120 » dans la
 #   spec — OBJECTIFS.md §17) — chaque personne émet des billets et les
 #   produits sans jauge n'ont pas d'autre borne ;
-# - une commande compte au plus MAX_ITEMS_PER_RESERVATION lignes
-#   (le catalogue actif en compte moins de 10) ;
+# - une commande compte au plus MAX_ITEMS_PER_RESERVATION lignes :
+#   les interfaces émettent 1 ligne par personne individuelle, donc
+#   la borne des lignes ne peut pas être inférieure au plafond de
+#   personnes — 120 lignes = 120 billets individuels vendables ;
 # - une tranche d'encaissement est plafonnée à 50 000 €, sous la
 #   capacité Numeric(10,2) = 99 999 999,99 € — aucun dépassement
 #   PostgreSQL possible.
 # Les bornes par champ échouent en 422 (Pydantic) ; le total de
 # personnes est aussi re-vérifié en agrégé par reservation_service,
 # car des lignes individuellement valides peuvent le dépasser.
-MAX_ITEMS_PER_RESERVATION = 10
+MAX_ITEMS_PER_RESERVATION = 120
 MAX_PERSONS_PER_RESERVATION = 120
 MAX_PAYMENT_AMOUNT = Decimal("50000.00")
 
