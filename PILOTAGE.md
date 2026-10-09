@@ -25,7 +25,7 @@ croissant d'exigence :
 Règle : écrire une documentation n'est pas une preuve ; une CI verte ne prouve
 que les tests présents ; une simulation n'est pas une expérience réelle.
 
-## Position actuelle — évaluation du 2026-10-06
+## Position actuelle — évaluation du 2026-10-09
 
 | Niveau (OBJECTIFS.md §20) | Statut |
 |---|---|
@@ -45,6 +45,14 @@ sur jauge 5 → exactement 5 × 201, `booked_seats == 5`, zéro dépassement ;
 `./venv/Scripts/python.exe scripts/test_concurrency.py` (depuis `backend/`).
 L'assertion manquante du test 5 (`test_booking.py`) a été ajoutée.
 Statut du mécanisme anti-surbooking : **démontré + reproductible**.
+
+**M4 — entamé (2026-10-09)** : volet « idempotence des paiements »
+livré et démontré — `idempotency_key` obligatoire, unique en base,
+snapshot `response` JSONB, rejeu 200 / conflit 409, concurrence
+démontrée par `test_concurrency.py` (1×201 + 7×200 même clé ;
+201 + 409 sur courses inter-réservations, y compris commandes à
+séance soldées). Reste à faire dans M4 :
+machine à états des paiements et échec/timeout simulables.
 
 **M2 — CI minimale : terminée et validée (2026-10-07).**
 

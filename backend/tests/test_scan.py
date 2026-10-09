@@ -72,9 +72,17 @@ def at_session(session_id) -> TicketScanRequest:
 async def paid_ticket(db, payload: ReservationCreate, amount: str):
     """Chaîne réelle : réservation → paiement soldé → billet émis."""
     resa = await create_reservation(db, payload)
-    _, _, _, resa = await add_payment(
-        db, resa.id, PaymentCreate(method=PaymentMethod.CB, amount=Decimal(amount))
-    )
+    resa = (
+        await add_payment(
+            db,
+            resa.id,
+            PaymentCreate(
+                method=PaymentMethod.CB,
+                amount=Decimal(amount),
+                idempotency_key=uuid.uuid4(),
+            ),
+        )
+    ).reservation
     assert resa.status == ReservationStatus.CONFIRMED
     assert len(resa.tickets) == 1
     return resa.tickets[0]

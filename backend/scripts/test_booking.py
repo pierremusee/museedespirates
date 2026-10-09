@@ -310,11 +310,22 @@ def get(url: str) -> tuple[int, dict | list]:
     return status, body
 
 
-def pay(reservation_id: str, method: str, amount: str) -> tuple[int, dict]:
+def pay(
+    reservation_id: str,
+    method: str,
+    amount: str,
+    key: str | None = None,
+) -> tuple[int, dict]:
     print(f"   Paiement {method} {amount} € :")
     return post(
         f"{BASE_URL}/reservations/{reservation_id}/payments",
-        {"method": method, "amount": amount},
+        {
+            "method": method,
+            "amount": amount,
+            # Clé d'idempotence : une nouvelle par défaut (nouvelle
+            # opération), réutilisée explicitement pour tester le rejeu.
+            "idempotency_key": key or str(uuid.uuid4()),
+        },
     )
 
 
@@ -360,7 +371,10 @@ async def main() -> None:
     expect(pay(resa["id"], "ancv", "87.00"), 400, "ANCV refusé en ligne")
     expect(pay(resa["id"], "cb", "50.00"), 400, "CB partiel refusé en ligne")
 
-    paid = expect(pay(resa["id"], "cb", "87.00"), 201, "test 1 — paiement CB")
+    key1 = str(uuid.uuid4())
+    paid = expect(
+        pay(resa["id"], "cb", "87.00", key=key1), 201,
+        "test 1 — paiement CB")
     assert paid["reservation_status"] == "confirmed"
     assert Decimal(paid["amount_due"]) == Decimal(0)
     tickets = paid["tickets"]
@@ -373,6 +387,19 @@ async def main() -> None:
     print("=> OK : billets multi-accès + total 87.00 conformes DFC n°5")
 
     expect(pay(resa["id"], "cb", "1.00"), 400, "paiement sur commande soldée")
+
+    # Idempotence : même clé + même contenu → rejeu 200 du snapshot
+    # initial (même transaction, aucun doublon) ; même clé + contenu
+    # différent → 409. Le test 12c re-vérifiera len(payments) == 1.
+    replay = expect(
+        pay(resa["id"], "cb", "87.00", key=key1), 200,
+        "test 1 — rejeu même clé")
+    assert replay == paid, "le rejeu doit restituer le snapshot initial"
+    expect(pay(resa["id"], "cb", "50.00", key=key1), 409,
+           "test 1 — même clé, montant différent")
+    expect(pay(resa["id"], "ancv", "87.00", key=key1), 409,
+           "test 1 — même clé, méthode différente")
+    print("=> OK : rejeu idempotent 200 + conflits de clé 409")
 
     print("\nTest 2 — pass_1_show adulte en HAUTE SAISON (attendu 22.00 = 20+2) :")
     resa2 = expect(post(f"{BASE_URL}/reservations", {
@@ -728,13 +755,30 @@ async def main() -> None:
         "items": [{"product_code": "museum_entry", "category": "adult",
                    "visit_date": today}],
     }), 201, "test 11b — création musée")
-    expect(pay(resa_p["id"], "cash", "5.00"), 201, "test 11b — acompte espèces")
+    key_p = str(uuid.uuid4())
+    paid_p = expect(
+        pay(resa_p["id"], "cash", "5.00", key=key_p), 201,
+        "test 11b — acompte espèces")
     cancelled_p = expect(
         post(f"{BASE_URL}/reservations/{resa_p['id']}/cancel"),
         200, "test 11b — annulation après acompte")
     assert len(cancelled_p["payments"]) == 1
     assert Decimal(cancelled_p["payments"][0]["amount"]) == Decimal("5.00")
     print("=> OK : encaissement conservé sur commande annulée")
+
+    # 11b-bis — réponse perdue puis annulation (scénario guichet) : le
+    # rejeu HTTP retrouve la tranche initiale (200 + snapshot identique),
+    # sans second encaissement ni changement de statut.
+    replay_p = expect(
+        pay(resa_p["id"], "cash", "5.00", key=key_p), 200,
+        "test 11b — rejeu de l'acompte après annulation")
+    assert replay_p == paid_p, \
+        "le rejeu doit restituer le snapshot de l'opération initiale"
+    s, detail_p = get(f"{BASE_URL}/reservations/{resa_p['id']}")
+    assert s == 200 and len(detail_p["payments"]) == 1
+    assert Decimal(detail_p["paid_amount"]) == Decimal("5.00")
+    assert detail_p["status"] == "cancelled"
+    print("=> OK : rejeu après annulation — snapshot, aucune duplication")
 
     # Cas d'erreur : payée/confirmée/annulée/inconnue → rejet.
     expect(pay(resa_p["id"], "cash", "7.00"), 400,

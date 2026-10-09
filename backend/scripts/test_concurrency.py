@@ -68,6 +68,15 @@ def post(url: str, payload: dict) -> tuple[int, dict]:
         return e.code, json.loads(e.read().decode() or "{}")
 
 
+def get(url: str) -> tuple[int, dict | list]:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        resp = urllib.request.urlopen(req)
+        return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode() or "{}")
+
+
 async def seed() -> dict:
     engine = create_async_engine(settings.DATABASE_URL)
     maker = async_sessionmaker(
@@ -107,6 +116,14 @@ async def seed() -> dict:
             max_capacity=K,
         )
         db.add(session)
+        # Seconde séance pour la course de clé sur commandes à séance
+        # (la première est saturée par le test de surbooking).
+        session_pay = Session(
+            event_id=theater.id,
+            start_time=datetime.now(UTC) + timedelta(days=2),
+            max_capacity=10,
+        )
+        db.add(session_pay)
         wanted = {
             "concurrency_theater": Product(
                 code="concurrency_theater", label="Concurrence Théâtre",
@@ -153,6 +170,7 @@ async def seed() -> dict:
         await db.commit()
         ids = {
             "session": str(session.id),
+            "session_pay": str(session_pay.id),
             "musee": str(musee.id),
         }
     await engine.dispose()
@@ -259,7 +277,8 @@ async def main() -> None:
     assert s == 201
     s, pay_result = post(
         f"{BASE_URL}/reservations/{resa['id']}/payments",
-        {"method": "cb", "amount": resa["total_price"]},
+        {"method": "cb", "amount": resa["total_price"],
+         "idempotency_key": str(uuid.uuid4())},
     )
     assert s == 201 and pay_result["reservation_status"] == "confirmed"
     ticket_id = pay_result["tickets"][0]["id"]
@@ -279,7 +298,273 @@ async def main() -> None:
         f"rejets inattendus : {sorted(set(scan_rejects))}"
     print("=> OK : 1 seul scan accepté sur M concurrents")
 
-    print("\nM1 — concurrence démontrée : anti-surbooking + anti double-scan.")
+    # --- 3. Paiements concurrents, même clé d'idempotence --------------
+    # Double-clic/retry côté client : M requêtes identiques portant la
+    # même clé sur la même commande — exactement une exécution.
+    print(f"\nPaiement concurrent : {M} requêtes, même clé d'idempotence")
+    s, resa_p = post(f"{BASE_URL}/reservations", {
+        "customer_email": "payconcurrent@test.fr",
+        "items": [{
+            "product_code": "concurrency_museum",
+            "category": "adult",
+            "visit_date": str(date.today()),
+        }],
+    })
+    assert s == 201
+    pay_key = str(uuid.uuid4())
+
+    def try_pay(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_p['id']}/payments",
+            {"method": "cb", "amount": resa_p["total_price"],
+             "idempotency_key": pay_key},
+        )
+
+    pays = concurrent(M, try_pay)
+    statuses = [s for s, _ in pays]
+    created = sum(1 for s in statuses if s == 201)
+    replays = sum(1 for s in statuses if s == 200)
+    payment_ids = {b["payment"]["id"] for _, b in pays}
+    print(f"Résultats : {created} × 201, {replays} × 200, "
+          f"payment ids distincts = {len(payment_ids)}")
+    assert created == 1, f"{created} créations au lieu de 1"
+    assert created + replays == M, f"statuts inattendus : {statuses}"
+    assert len(payment_ids) == 1, "transactions dupliquées sous la même clé"
+
+    s, detail = get(f"{BASE_URL}/reservations/{resa_p['id']}")
+    assert s == 200 and len(detail["payments"]) == 1
+    assert detail["status"] == "confirmed" and len(detail["tickets"]) == 1
+    print("=> OK : 1 transaction, 1 confirmation, 1 billet")
+
+    # --- 4. Course de clé entre deux réservations différentes ----------
+    # La même clé visant deux commandes : le FOR UPDATE ne les
+    # sérialise pas — l'index unique tranche, le perdant obtient 409.
+    print("\nCourse de clé : même clé sur deux réservations distinctes")
+    resa_ids = []
+    for i in range(2):
+        s, r = post(f"{BASE_URL}/reservations", {
+            "customer_email": f"keyrace{i}@test.fr",
+            "channel": "pos",
+            "items": [{
+                "product_code": "concurrency_museum",
+                "category": "adult",
+                "visit_date": str(date.today()),
+            }],
+        })
+        assert s == 201
+        resa_ids.append(r["id"])
+    shared_key = str(uuid.uuid4())
+
+    def try_pay_other(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_ids[i]}/payments",
+            {"method": "cash", "amount": "5.00",
+             "idempotency_key": shared_key},
+        )
+
+    race = concurrent(2, try_pay_other)
+    codes = sorted(s for s, _ in race)
+    print(f"Résultats : {codes}")
+    assert codes == [201, 409], \
+        f"attendu 1 succès + 1 conflit, obtenu {codes}"
+    for rid in resa_ids:
+        s, detail = get(f"{BASE_URL}/reservations/{rid}")
+        assert s == 200
+        assert len(detail["payments"]) <= 1
+    total_payments = sum(
+        len(get(f"{BASE_URL}/reservations/{rid}")[1]["payments"])
+        for rid in resa_ids
+    )
+    assert total_payments == 1, "la clé a été honorée deux fois"
+    print("=> OK : l'index unique tranche la course, 1 seul encaissement")
+
+    # --- 5. Même clé, contenus différents, en concurrence --------------
+    # Bug client ou fraude : même clé, méthodes/montants divergents —
+    # le gagnant enregistre, le perdant obtient 409 (jamais 2 lignes).
+    print("\nMême clé, contenus différents (concurrence)")
+    s, resa_d = post(f"{BASE_URL}/reservations", {
+        "customer_email": "diffkey@test.fr",
+        "channel": "pos",
+        "items": [{
+            "product_code": "concurrency_museum",
+            "category": "adult",
+            "visit_date": str(date.today()),
+        }],
+    })
+    assert s == 201
+    diff_key = str(uuid.uuid4())
+    variants = [
+        {"method": "cash", "amount": "2.00", "idempotency_key": diff_key},
+        {"method": "ancv", "amount": "3.00", "idempotency_key": diff_key},
+    ]
+
+    def try_pay_diff(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_d['id']}/payments",
+            variants[i],
+        )
+
+    diff = concurrent(2, try_pay_diff)
+    codes = sorted(s for s, _ in diff)
+    print(f"Résultats : {codes}")
+    assert codes == [201, 409], \
+        f"attendu 1 succès + 1 conflit, obtenu {codes}"
+    s, detail = get(f"{BASE_URL}/reservations/{resa_d['id']}")
+    assert s == 200 and len(detail["payments"]) == 1
+    print("=> OK : une seule empreinte honorée, l'autre rejetée 409")
+
+    # --- 6. Tranches concurrentes proches du solde (clés distinctes) ---
+    # Deux opérations légitimes simultanées : le FOR UPDATE sérialise,
+    # le second voit le solde mis à jour — jamais de sur-encaissement.
+    print("\nTranches concurrentes proches du solde (clés distinctes)")
+    s, resa_e = post(f"{BASE_URL}/reservations", {
+        "customer_email": "nearsold@test.fr",
+        "channel": "pos",
+        "items": [{
+            "product_code": "concurrency_museum",
+            "category": "adult",
+            "visit_date": str(date.today()),
+        }],
+    })
+    assert s == 201  # total 5.00
+
+    # Deux ANCV de 3.00 sur un solde de 5.00 : le second est plafonné
+    # au solde restant (2.00, excédent perdu — DFC n°7, jamais de rendu
+    # ANCV). Les deux tranches sont légitimes : invariant = la somme
+    # imputée ne dépasse jamais le total.
+    def try_near(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_e['id']}/payments",
+            {"method": "ancv", "amount": "3.00",
+             "idempotency_key": str(uuid.uuid4())},
+        )
+
+    near = concurrent(2, try_near)
+    codes = sorted(s for s, _ in near)
+    print(f"Résultats : {codes}")
+    assert codes == [201, 201], f"attendu [201, 201], obtenu {codes}"
+    s, detail = get(f"{BASE_URL}/reservations/{resa_e['id']}")
+    assert len(detail["payments"]) == 2
+    applied = sum(Decimal(p["applied_amount"]) for p in detail["payments"])
+    assert applied == Decimal("5.00"), f"sur-encaissement : {applied}"
+    assert Decimal(detail["amount_due"]) == Decimal("0.00")
+    assert detail["status"] == "confirmed"
+    print("=> OK : 2e tranche plafonnée au solde, total exact, confirmée")
+
+    # --- 7. N clés distinctes, même réservation ------------------------
+    # Quatre tranches cash concurrentes : toutes légitimes, toutes
+    # sérialisées — le total encaissé reflète exactement les 4 lignes.
+    print("\nQuatre tranches cash concurrentes (clés distinctes)")
+    s, resa_f = post(f"{BASE_URL}/reservations", {
+        "customer_email": "multikey@test.fr",
+        "channel": "pos",
+        "items": [{
+            "product_code": "concurrency_museum",
+            "category": "adult",
+            "visit_date": str(date.today()),
+        }],
+    })
+    assert s == 201  # total 5.00
+
+    def try_cash(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_f['id']}/payments",
+            {"method": "cash", "amount": "1.00",
+             "idempotency_key": str(uuid.uuid4())},
+        )
+
+    multi = concurrent(4, try_cash)
+    codes = sorted(s for s, _ in multi)
+    print(f"Résultats : {codes}")
+    assert all(s == 201 for s, _ in multi), \
+        f"statuts inattendus : {codes}"
+    s, detail = get(f"{BASE_URL}/reservations/{resa_f['id']}")
+    assert len(detail["payments"]) == 4
+    assert Decimal(detail["paid_amount"]) == Decimal("4.00")
+    assert Decimal(detail["amount_due"]) == Decimal("1.00")
+    assert detail["status"] == "pending"
+    print("=> OK : 4 tranches distinctes enregistrées, solde exact")
+
+    # --- 8. Course de clé : commandes à séance soldées -----------------
+    # Régression AUDIT-001 : même clé sur deux réservations comportant
+    # une séance, l'encaissement soldant la commande — l'autoflush
+    # déclenché par _emit_tickets laissait échapper l'IntegrityError
+    # (500 au lieu de 409). Ce qui est déterministe ici, c'est le
+    # CONTRAT : un 201, un 409, un seul encaissement, aucun état
+    # partiel. La branche qui produit le 409 (second lookup sous le
+    # verrou ou récupération après IntegrityError) dépend du timing
+    # réel de la course — les deux branches sont exercées
+    # déterministiquement par tests/test_payments.py.
+    print("\nCourse de clé à séance : même clé, commandes soldées")
+    resa_ids = []
+    for i in range(2):
+        s, r = post(f"{BASE_URL}/reservations", {
+            "customer_email": f"keyrace_session{i}@test.fr",
+            "channel": "pos",
+            "items": [{
+                "product_code": "concurrency_theater",
+                "category": "adult",
+                "session_id": ids["session_pay"],
+            }],
+        })
+        assert s == 201, r
+        resa_ids.append(r["id"])
+    session_key = str(uuid.uuid4())
+
+    def try_pay_session(i: int):
+        return post(
+            f"{BASE_URL}/reservations/{resa_ids[i]}/payments",
+            {"method": "cash", "amount": "10.00",
+             "idempotency_key": session_key},
+        )
+
+    race = concurrent(2, try_pay_session)
+    codes = sorted(s for s, _ in race)
+    print(f"Résultats : {codes}")
+    assert codes == [201, 409], \
+        f"attendu 1 succès + 1 conflit, obtenu {codes}"
+    winner_resp = next(b for s, b in race if s == 201)
+    loser_resp = next(b for s, b in race if s == 409)
+    # Le 409 doit provenir du rejet d'empreinte d'idempotence, pas
+    # d'un autre conflit (ex. émission impossible).
+    assert "opération différente" in loser_resp.get("detail", ""), \
+        f"409 inattendu : {loser_resp}"
+    details = []
+    for rid in resa_ids:
+        s, detail = get(f"{BASE_URL}/reservations/{rid}")
+        assert s == 200
+        details.append(detail)
+    assert sum(len(d["payments"]) for d in details) == 1, \
+        "la clé a été honorée deux fois"
+    winner = next(d for d in details if d["payments"])
+    loser = next(d for d in details if not d["payments"])
+    assert winner["status"] == "confirmed" and len(winner["tickets"]) == 1
+    # AUDIT-007 : le corps du 201 EST le snapshot `response` figé en
+    # base — ses champs de séance doivent être renseignés, et la
+    # relecture GET doit restituer les mêmes valeurs.
+    snap_access = winner_resp["tickets"][0]["accesses"][0]
+    assert snap_access["session_id"] == ids["session_pay"]
+    assert snap_access["session_start"] is not None
+    assert snap_access["session_event_title"] == \
+        "Concurrence Théâtre (test)"
+    get_access = winner["tickets"][0]["accesses"][0]
+    assert get_access["session_start"] == snap_access["session_start"]
+    assert get_access["session_event_title"] == \
+        snap_access["session_event_title"]
+    assert loser["status"] == "pending" and loser["tickets"] == []
+    # Le perdant reste encaissable avec une clé nouvelle : la tentative
+    # rejetée n'a laissé ni verrou ni état résiduel.
+    s, retry = post(
+        f"{BASE_URL}/reservations/{loser['id']}/payments",
+        {"method": "cash", "amount": "10.00",
+         "idempotency_key": str(uuid.uuid4())},
+    )
+    assert s == 201 and retry["reservation_status"] == "confirmed", retry
+    print("=> OK : 201 + 409 sur commandes à séance, snapshot fidèle, "
+          "perdant soldable")
+
+    print("\nConcurrence démontrée : anti-surbooking, anti double-scan, "
+          "idempotence des paiements.")
 
 
 async def run() -> None:

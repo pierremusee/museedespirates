@@ -1,11 +1,13 @@
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -31,6 +33,7 @@ from app.models.ticket import Ticket, TicketCategory, TicketType
 from app.models.ticket_access import TicketAccess
 from app.schemas.reservation import (
     PaymentCreate,
+    PaymentResult,
     ReservationCreate,
     ReservationItemCreate,
 )
@@ -218,6 +221,12 @@ async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
                     TicketAccess(
                         access_type=SESSION_TICKET_TYPE[component_type],
                         session_id=session.id,
+                        # Relation peuplée explicitement : les propriétés
+                        # de sérialisation (session_start,
+                        # session_event_title) lisent l'objet chargé —
+                        # la séance et son événement le sont déjà,
+                        # aucune requête supplémentaire.
+                        session=session,
                         event_id=session.event_id,
                         valid_date=_session_day(session),
                     )
@@ -601,15 +610,96 @@ def _has_group_or_school(reservation: Reservation) -> bool:
     )
 
 
+@dataclass
+class AddPaymentResult:
+    """Résultat d'un encaissement, découplé du transport HTTP.
+
+    `result` est le `PaymentResult` sérialisé — pour un rejeu, le
+    snapshot persisté à l'opération initiale, restitué verbatim même si
+    la commande a évolué depuis. `replayed` signale un rejeu : la route
+    choisit le statut HTTP (201 création, 200 rejeu).
+    """
+
+    result: dict
+    replayed: bool
+    payment: PaymentTransaction
+    reservation: Reservation | None
+
+    @property
+    def change_due(self) -> Decimal:
+        return Decimal(str(self.result["change_due"]))
+
+    @property
+    def amount_due(self) -> Decimal:
+        return Decimal(str(self.result["amount_due"]))
+
+
+def _same_operation(
+    payment: PaymentTransaction,
+    reservation_id: uuid.UUID,
+    data: PaymentCreate,
+) -> bool:
+    """Empreinte métier normalisée d'une opération de paiement :
+    réservation, moyen de paiement et montant nominal."""
+    return (
+        payment.reservation_id == reservation_id
+        and payment.method == data.method
+        and payment.amount == data.amount
+    )
+
+
+async def _replay_payment(
+    db: AsyncSession,
+    reservation_id: uuid.UUID,
+    data: PaymentCreate,
+    existing: PaymentTransaction,
+) -> AddPaymentResult:
+    """Rejoue une opération déjà enregistrée, ou rejette la réutilisation
+    de la clé avec un contenu différent (409)."""
+    if not _same_operation(existing, reservation_id, data):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Clé d'idempotence déjà utilisée pour une opération "
+            "différente",
+        )
+    reservation = (
+        await db.execute(
+            select(Reservation)
+            .options(selectinload(Reservation.payments))
+            .where(Reservation.id == reservation_id)
+        )
+    ).scalar_one_or_none()
+    return AddPaymentResult(
+        result=existing.response,
+        replayed=True,
+        payment=existing,
+        reservation=reservation,
+    )
+
+
 async def add_payment(
     db: AsyncSession, reservation_id: uuid.UUID, data: PaymentCreate
-) -> tuple[PaymentTransaction, Decimal, Decimal, Reservation]:
-    """Encaisse une tranche de paiement (DFC n°7).
+) -> AddPaymentResult:
+    """Encaisse une tranche de paiement (DFC n°7), idempotent par
+    `idempotency_key`.
 
-    Retourne (transaction, rendu de monnaie, reste à payer, réservation).
-    La réservation passe à `confirmed` et ses billets sont émis dès que
-    le solde atteint 0.
+    Même clé + même contenu (réservation, moyen, montant) → rejeu du
+    résultat initial sans nouvel encaissement. Même clé + contenu
+    différent → 409. Clé nouvelle → traitement normal : la réservation
+    passe à `confirmed` et ses billets sont émis dès que le solde
+    atteint 0.
     """
+    # Chemin rapide : la clé existe déjà → rejeu ou 409 sans verrouiller.
+    existing = (
+        await db.execute(
+            select(PaymentTransaction).where(
+                PaymentTransaction.idempotency_key == data.idempotency_key
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return await _replay_payment(db, reservation_id, data, existing)
+
     result = await db.execute(
         select(Reservation)
         .options(
@@ -636,6 +726,21 @@ async def add_payment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Réservation introuvable",
         )
+
+    # Second lookup sous le verrou : une requête concurrente portant la
+    # même clé a pu commiter entre le chemin rapide et l'acquisition du
+    # FOR UPDATE — son rejeu doit primer sur la garde de statut (une
+    # commande soldée par l'opération initiale renvoie 200, pas 400).
+    existing = (
+        await db.execute(
+            select(PaymentTransaction).where(
+                PaymentTransaction.idempotency_key == data.idempotency_key
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return await _replay_payment(db, reservation_id, data, existing)
+
     if reservation.status != ReservationStatus.PENDING:
         labels = {
             ReservationStatus.CONFIRMED: "Réservation déjà soldée",
@@ -697,17 +802,67 @@ async def add_payment(
         method=data.method,
         amount=data.amount,
         applied_amount=applied,
+        idempotency_key=data.idempotency_key,
     )
     reservation.payments.append(payment)
 
     new_due = remaining - applied
-    if new_due == 0:
-        reservation.status = ReservationStatus.CONFIRMED
-        await _emit_tickets(db, reservation)
+    try:
+        # INSERT contrôlé de la tranche AVANT l'émission des billets :
+        # c'est ici que l'INSERT rencontre l'index unique sur la clé —
+        # la course se règle donc dès ce flush, dans le périmètre de
+        # récupération. Sans flush explicite, les lectures de
+        # _emit_tickets déclencheraient un autoflush hors de ce
+        # périmètre (le paiement est déjà pending via l'append) : la
+        # collision de clé remontait en 500 au lieu de 409 — le cas
+        # n'apparaît que sur une commande à séance soldée par
+        # l'encaissement.
+        db.add(payment)
+        await db.flush()
 
-    db.add(payment)
-    await db.commit()
-    return payment, change_due, new_due, reservation
+        if new_due == 0:
+            reservation.status = ReservationStatus.CONFIRMED
+            await _emit_tickets(db, reservation)
+
+        # Re-flush avant la sérialisation : ids et created_at sont
+        # générés en base (server_default) comme les ids des billets
+        # émis.
+        await db.flush()
+        snapshot = PaymentResult(
+            payment=payment,
+            change_due=change_due,
+            amount_due=new_due,
+            reservation_status=reservation.status,
+            tickets=reservation.tickets,
+        ).model_dump(mode="json")
+        payment.response = snapshot
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # Course : la même clé a été insérée par une transaction
+        # concurrente entre le lookup et le commit — possible quand les
+        # deux requêtes visent des réservations différentes (le FOR
+        # UPDATE ne les sérialise pas). L'index unique est la garantie
+        # ultime ; relire l'opération gagnante puis rejeu ou 409 selon
+        # l'empreinte. Toute autre violation de contrainte remonte.
+        winner = (
+            await db.execute(
+                select(PaymentTransaction).where(
+                    PaymentTransaction.idempotency_key
+                    == data.idempotency_key
+                )
+            )
+        ).scalar_one_or_none()
+        if winner is None:
+            raise
+        return await _replay_payment(db, reservation_id, data, winner)
+
+    return AddPaymentResult(
+        result=snapshot,
+        replayed=False,
+        payment=payment,
+        reservation=reservation,
+    )
 
 
 async def cancel_reservation(

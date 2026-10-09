@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CalendarClock, Loader2, Minus, Plus, Ticket } from "lucide-react";
 import { toast } from "sonner";
@@ -18,6 +18,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import {
+  checkPreviousOutcome,
+  clearPendingPayment,
+  pendingAction,
+  readPendingPayment,
+  savePendingPayment,
+  type PendingPayment,
+} from "./pending-payment";
 
 type Category = "adult" | "child" | "reduced";
 type FreeProfile = "under_4" | "disability" | "pmr_companion";
@@ -108,6 +116,25 @@ export function ReservationDialog({
   const [selectedSessions, setSelectedSessions] = useState<string[]>([]);
   const [extraSessionId, setExtraSessionId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Verrou synchrone : `submitting` (state) laisse passer un double
+  // submit dans le même batch React — le ref bloque immédiatement.
+  const submitInFlight = useRef(false);
+  // Paiement à l'issue incertaine en attente (même réservation, même
+  // clé d'idempotence) — miroir de sessionStorage, cf pending-payment.ts.
+  const pendingRef = useRef<PendingPayment | null>(null);
+  // Opération incertaine affichée : tant qu'elle existe pour CE produit,
+  // le formulaire est figé — l'estimation ne doit pas se substituer au
+  // montant réellement engagé. Chargée à l'ouverture (sessionStorage
+  // est indisponible côté serveur).
+  const [pendingUI, setPendingUI] = useState<PendingPayment | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const p = pendingRef.current ?? readPendingPayment(sessionStorage);
+    setPendingUI(
+      p && pendingAction(p, product.code) === "resume" ? p : null
+    );
+  }, [open, product.code]);
 
   const isFamily = product.kind === "family";
   const needsSessions = sessionCount > 0;
@@ -181,37 +208,94 @@ export function ReservationDialog({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (needsSessions && selectedSessions.length !== sessionCount) {
-      toast.error(
-        `Sélectionnez ${sessionCount} séance${sessionCount > 1 ? "s" : ""}.`
-      );
-      return;
-    }
-    if (persons === 0) {
-      toast.error("Sélectionnez au moins un billet.");
-      return;
-    }
-    if (needsSessions && persons > capacity) {
-      toast.error("Pas assez de places disponibles sur cette séance.");
-      return;
-    }
-    if (extraSessionId === "") {
-      toast.error("Choisissez la séance supplémentaire.");
-      return;
-    }
-    if (extraSessionId) {
-      const extra = sessions.find((s) => s.id === extraSessionId);
-      if (!extra || extra.remaining < persons) {
+    if (submitInFlight.current) return;
+    // Opération à l'issue incertaine persistée (mémoire, puis
+    // sessionStorage pour survivre au rechargement) — lue AVANT les
+    // validations : la reprise rejoue le paiement de la réservation
+    // existante, les paramètres du panier ne sont pas revalidés.
+    const stored = pendingRef.current ?? readPendingPayment(sessionStorage);
+    const resuming =
+      stored !== null && pendingAction(stored, product.code) === "resume";
+    if (!resuming) {
+      if (needsSessions && selectedSessions.length !== sessionCount) {
         toast.error(
-          "Pas assez de places disponibles sur la séance supplémentaire."
+          `Sélectionnez ${sessionCount} séance${sessionCount > 1 ? "s" : ""}.`
         );
         return;
+      }
+      if (persons === 0) {
+        toast.error("Sélectionnez au moins un billet.");
+        return;
+      }
+      if (needsSessions && persons > capacity) {
+        toast.error("Pas assez de places disponibles sur cette séance.");
+        return;
+      }
+      if (extraSessionId === "") {
+        toast.error("Choisissez la séance supplémentaire.");
+        return;
+      }
+      if (extraSessionId) {
+        const extra = sessions.find((s) => s.id === extraSessionId);
+        if (!extra || extra.remaining < persons) {
+          toast.error(
+            "Pas assez de places disponibles sur la séance supplémentaire."
+          );
+          return;
+        }
       }
     }
 
     setSubmitting(true);
+    submitInFlight.current = true;
     try {
-      const base = {
+      const api = process.env.NEXT_PUBLIC_API_URL;
+      let pending = stored;
+
+      if (
+        pending &&
+        pendingAction(pending, product.code) === "check_previous"
+      ) {
+        // L'opération en attente concernait un autre produit : résoudre
+        // son issue avant de l'écraser. Confirmée → le paiement avait
+        // abouti, on conclut sur cette commande ; sinon la purge TTL
+        // restituera sa jauge et la nouvelle opération démarre libre.
+        const outcome = await checkPreviousOutcome(
+          fetch,
+          api ?? "",
+          pending
+        );
+        if (outcome === "conclude") {
+          pendingRef.current = null;
+          setPendingUI(null);
+          clearPendingPayment(sessionStorage);
+          setOpen(false);
+          router.push(`/succes?id=${pending.reservationId}`);
+          return;
+        }
+        if (outcome === "unknown") {
+          // L'échec de lecture ne prouve rien sur le sort du paiement :
+          // la clé est conservée et tout nouvel achat est bloqué
+          // jusqu'à ce que l'état de l'opération soit établi.
+          pendingRef.current = pending;
+          toast.error(
+            "Impossible de vérifier le paiement en cours — aucune nouvelle commande n'a été créée. Réessayez."
+          );
+          return;
+        }
+        pending = null;
+        pendingRef.current = null;
+        setPendingUI(null);
+        clearPendingPayment(sessionStorage);
+      }
+
+      // `resuming` (défini en tête de fonction) : même réservation,
+      // même clé — jamais de second panier.
+      let reservationId = pending?.reservationId ?? "";
+      let reservationTotal = pending?.amount ?? "0";
+
+      if (!resuming) {
+        const base = {
         visit_date: hasMuseumDay ? visitDate : undefined,
         session_ids: needsSessions ? selectedSessions : undefined,
       };
@@ -286,18 +370,15 @@ export function ReservationDialog({
         }
       }
 
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/reservations`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            customer_email: email,
-            channel: "web",
-            items,
-          }),
-        }
-      );
+      const res = await fetch(`${api}/reservations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customer_email: email,
+          channel: "web",
+          items,
+        }),
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         toast.error(body.detail ?? `Erreur ${res.status} lors de la réservation.`);
@@ -306,40 +387,102 @@ export function ReservationDialog({
         return;
       }
       const reservation = await res.json();
+      reservationId = reservation.id;
+      reservationTotal = reservation.total_price;
+      // L'opération est enregistrée AVANT l'appel de paiement : si la
+      // réponse se perd, le prochain essai la reprendra telle quelle.
+      if (Number(reservation.total_price) > 0) {
+        pending = {
+          reservationId: reservation.id,
+          productCode: product.code,
+          paymentKey: crypto.randomUUID(),
+          amount: reservation.total_price,
+        };
+        pendingRef.current = pending;
+        setPendingUI(pending);
+        savePendingPayment(pending, sessionStorage);
+      }
+      }
 
       // Canal web (DFC n°7) : paiement unique par CB, simulé ici.
       // Les commandes à 0 € sont déjà confirmées — bypass intact.
-      if (Number(reservation.total_price) > 0) {
+      if (pending && Number(reservationTotal) > 0) {
+        if (!pending.paymentKey) {
+          // La tentative précédente a été rejetée (4xx certain) : la
+          // clé est libérée, cette nouvelle tentative en reçoit une
+          // neuve — la réservation pending n'est pas recréée.
+          pending.paymentKey = crypto.randomUUID();
+          pendingRef.current = pending;
+          savePendingPayment(pending, sessionStorage);
+        }
         const payRes = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL}/reservations/${reservation.id}/payments`,
+          `${api}/reservations/${pending.reservationId}/payments`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               method: "cb",
-              amount: reservation.total_price,
+              amount: pending.amount,
+              idempotency_key: pending.paymentKey,
             }),
           }
         );
         if (!payRes.ok) {
           const body = await payRes.json().catch(() => ({}));
-          toast.error(body.detail ?? "Le paiement par carte a échoué.");
+          if (payRes.status >= 500) {
+            // Issue incertaine : clé et paramètres conservés pour
+            // reprise à la prochaine tentative.
+            toast.error(
+              "Erreur serveur — le résultat du paiement est incertain ; il sera repris au prochain essai."
+            );
+          } else {
+            // Rejet métier certain (4xx) : rien n'est enregistré — la
+            // clé est libérée ; si la réservation n'est plus payable
+            // (expirée/annulée), l'opération est abandonnée.
+            let payable = true;
+            try {
+              const chk = await fetch(
+                `${api}/reservations/${pending.reservationId}`,
+                { cache: "no-store" }
+              );
+              payable = chk.ok && (await chk.json()).status === "pending";
+            } catch {
+              payable = true; // statut inconnu → on conserve l'opération
+            }
+            if (payable) {
+              pending.paymentKey = null;
+              pendingRef.current = pending;
+              setPendingUI(pending);
+              savePendingPayment(pending, sessionStorage);
+            } else {
+              pendingRef.current = null;
+              setPendingUI(null);
+              clearPendingPayment(sessionStorage);
+            }
+            toast.error(body.detail ?? "Le paiement par carte a échoué.");
+          }
           setOpen(false);
           router.refresh();
           return;
         }
       }
 
+      pendingRef.current = null;
+      setPendingUI(null);
+      clearPendingPayment(sessionStorage);
       toast.success(
         estimate === 0
           ? "Entrées gratuites validées !"
           : "Paiement accepté — réservation confirmée !"
       );
       setOpen(false);
-      router.push(`/succes?id=${reservation.id}`);
+      router.push(`/succes?id=${reservationId}`);
     } catch {
+      // Réseau/timeout : l'opération en attente (le cas échéant) reste
+      // persistée et sera reprise au prochain essai.
       toast.error("Impossible de joindre le serveur. Réessayez plus tard.");
     } finally {
+      submitInFlight.current = false;
       setSubmitting(false);
     }
   }
@@ -403,6 +546,24 @@ export function ReservationDialog({
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-5">
+          {pendingUI && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-700 dark:bg-amber-950/40">
+              <p className="font-medium">
+                Paiement en attente :{" "}
+                {eurFormatter.format(Number(pendingUI.amount))} par CB
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Le résultat de l&apos;opération précédente est incertain —
+                la commande est figée, reprenez le paiement ci-dessous.
+              </p>
+            </div>
+          )}
+          {/* Tant qu'une opération est incertaine, ses paramètres sont
+              figés : le fieldset désactive tous les contrôles du panier. */}
+          <fieldset
+            disabled={pendingUI !== null}
+            className="m-0 min-w-0 space-y-5 border-0 p-0 disabled:opacity-70"
+          >
           {needsSessions && (
             <div className="space-y-2">
               <Label>
@@ -561,10 +722,16 @@ export function ReservationDialog({
 
           <div className="flex items-center justify-between rounded-lg border bg-muted/40 px-4 py-3">
             <span className="text-sm font-medium">
-              {estimate === 0 ? "Gratuit — aucun paiement requis" : "Total estimé"}
+              {pendingUI
+                ? "Montant de l'opération en attente"
+                : estimate === 0
+                  ? "Gratuit — aucun paiement requis"
+                  : "Total estimé"}
             </span>
             <span className="text-lg font-bold tabular-nums">
-              {eurFormatter.format(estimate)}
+              {eurFormatter.format(
+                pendingUI ? Number(pendingUI.amount) : estimate
+              )}
             </span>
           </div>
 
@@ -572,21 +739,26 @@ export function ReservationDialog({
             * Tarif réduit et gratuités : justificatif exigé au contrôle
             d&apos;accès.
           </p>
+          </fieldset>
 
           <DialogFooter>
             <Button
               type="submit"
               disabled={
                 submitting ||
-                persons === 0 ||
-                extraSessionId === "" ||
-                (needsSessions && selectedSessions.length !== sessionCount)
+                (!pendingUI &&
+                  (persons === 0 ||
+                    extraSessionId === "" ||
+                    (needsSessions &&
+                      selectedSessions.length !== sessionCount)))
               }
             >
               {submitting && <Loader2 className="size-4 animate-spin" />}
-              {estimate === 0
-                ? `Valider — ${persons} entrée${persons > 1 ? "s" : ""} gratuite${persons > 1 ? "s" : ""}`
-                : `Payer ${eurFormatter.format(estimate)} par CB`}
+              {pendingUI
+                ? `Reprendre le paiement de ${eurFormatter.format(Number(pendingUI.amount))}`
+                : estimate === 0
+                  ? `Valider — ${persons} entrée${persons > 1 ? "s" : ""} gratuite${persons > 1 ? "s" : ""}`
+                  : `Payer ${eurFormatter.format(estimate)} par CB`}
             </Button>
           </DialogFooter>
         </form>

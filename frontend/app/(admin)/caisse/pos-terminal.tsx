@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Banknote,
   ChevronDown,
   CreditCard,
@@ -53,6 +54,13 @@ import {
   type SessionOption,
   type Tariff,
 } from "./cart";
+import {
+  clearPosPending,
+  readPosPending,
+  resolveStoredPending,
+  savePosPending,
+  type PosPendingPayment,
+} from "./pos-pending";
 
 // ---------------------------------------------------------------------------
 // Types locaux (UI / encaissement)
@@ -65,7 +73,18 @@ type OrderState = {
   total: number;
   paid: number;
   due: number;
-  status: "pending" | "confirmed" | "cancelled";
+  status: "pending" | "confirmed" | "cancelled" | "expired";
+};
+
+// Réponse de GET /reservations/{id} — lecture de restauration.
+type ReservationDetail = {
+  id: string;
+  status: string;
+  total_price: string;
+  paid_amount: string;
+  amount_due: string;
+  payments?: { method: string; amount: string; applied_amount: string }[];
+  tickets?: TicketRead[];
 };
 
 type PaymentEntry = {
@@ -153,6 +172,22 @@ export function PosTerminal({
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [amountStr, setAmountStr] = useState("");
   const [busy, setBusy] = useState(false);
+  // Verrou synchrone : `busy` (state React) laisse passer un double
+  // clic dans le même batch — le ref bloque la rentrée immédiatement.
+  const paymentInFlight = useRef(false);
+  // Opération d'encaissement incertaine : clé + paramètres figés tant
+  // que le serveur n'a pas tranché. State (pas ref) car elle pilote le
+  // rendu ; persistée en sessionStorage pour survivre au rechargement.
+  const [pendingOp, setPendingOp] = useState<PosPendingPayment | null>(
+    null
+  );
+  // Opération restaurée dont l'état n'a pas pu être établi : la caisse
+  // reste bloquée jusqu'à vérification — jamais de nouvelle vente
+  // silencieuse alors qu'un encaissement (espèces notamment) a pu avoir
+  // lieu au guichet.
+  const [restoreBlocked, setRestoreBlocked] =
+    useState<PosPendingPayment | null>(null);
+  const [restoreTick, setRestoreTick] = useState(0);
 
   const hasGroup = lines.some((l) => l.product.kind === "group");
   const estimate = lines.reduce(
@@ -168,6 +203,90 @@ export function PosTerminal({
   const extraErrCount = extraLines.filter(
     (l) => lineErrors(l) !== null
   ).length;
+
+  // Restaure localement une commande lue via GET /reservations/{id}
+  // (reprise après rechargement de la page de caisse).
+  function applyReservation(detail: ReservationDetail) {
+    setOrder({
+      id: detail.id,
+      total: Number(detail.total_price),
+      paid: Number(detail.paid_amount),
+      due: Number(detail.amount_due),
+      status: detail.status as OrderState["status"],
+    });
+    setPayments(
+      (detail.payments ?? []).map((p) => ({
+        method: p.method as PaymentMethod,
+        amount: Number(p.amount),
+        applied: Number(p.applied_amount),
+        // Le rendu n'est pas renvoyé par le GET : reconstitué pour les
+        // espèces (nominal − imputé), nul sinon — affichage seul.
+        change:
+          p.method === "cash"
+            ? Number(p.amount) - Number(p.applied_amount)
+            : 0,
+      }))
+    );
+    if (detail.tickets) setTickets(detail.tickets);
+  }
+
+  // Rechargement avec un encaissement incertain persisté : vérifier la
+  // commande AVANT d'autoriser toute nouvelle vente. `restoreTick`
+  // permet au bouton « Revérifier » de relancer la résolution.
+  useEffect(() => {
+    const stored = readPosPending(sessionStorage);
+    if (!stored) return;
+    void (async () => {
+      const { action, detail: rawDetail } = await resolveStoredPending(
+        fetch,
+        API ?? "",
+        stored
+      );
+      const detail = rawDetail as ReservationDetail | null;
+      if (action === "blocked") {
+        setRestoreBlocked(stored);
+        toast.error(
+          "Un encaissement précédent n'a pas pu être vérifié — la caisse est bloquée jusqu'à résolution."
+        );
+        return;
+      }
+      setRestoreBlocked(null);
+      if (action === "conclude") {
+        // Le paiement avait abouti : la commande confirmée est
+        // restaurée (billets récupérables), la clé est libérée.
+        clearPosPending(sessionStorage);
+        if (detail) {
+          applyReservation(detail);
+          setShowTickets(true);
+        }
+        toast.success(
+          "L'encaissement en attente avait abouti — commande confirmée restaurée."
+        );
+        return;
+      }
+      if (action === "resume" && detail) {
+        // Commande toujours payable : la même opération (même clé,
+        // mêmes paramètres) peut être reprise — rejouée côté serveur
+        // si l'encaissement avait été enregistré.
+        applyReservation(detail);
+        setPendingOp(stored);
+        toast.info(
+          "Encaissement incertain restauré — reprenez-le avec les paramètres figés (clé conservée)."
+        );
+        return;
+      }
+      // abandon : commande annulée/expirée — clé libérée ; les
+      // encaissements éventuels restent tracés côté serveur
+      // (remboursement manuel si nécessaire).
+      clearPosPending(sessionStorage);
+      const n = detail?.payments?.length ?? 0;
+      toast.info(
+        n > 0
+          ? `Commande ${detail?.status} — ${n} encaissement(s) déjà enregistré(s) : remboursement manuel requis.`
+          : "L'opération précédente est abandonnée (commande inactive)."
+      );
+    })();
+  }, [restoreTick]);
 
   // -------------------------------------------------------------------------
   // Panier
@@ -405,6 +524,14 @@ export function PosTerminal({
   }
 
   async function submitOrder() {
+    if (pendingOp || restoreBlocked) {
+      // Un encaissement incertain ne doit jamais coexister avec une
+      // nouvelle vente : résoudre l'opération d'abord.
+      toast.error(
+        "Un encaissement est en attente de résolution — terminez-le avant une nouvelle vente."
+      );
+      return;
+    }
     const bad = lines.find((l) => lineErrors(l) !== null);
     if (bad) {
       toast.error(`${bad.product.label} : ${lineErrors(bad)}`);
@@ -462,24 +589,71 @@ export function PosTerminal({
       : 0;
 
   async function pay() {
-    if (!order || amount <= 0 || busy) return;
+    if (!order || paymentInFlight.current) return;
+    // Montant figé sur l'opération en attente : les champs du formulaire
+    // sont ignorés tant que la tranche précédente n'est pas résolue.
+    const amount = pendingOp ? Number(pendingOp.amount) : Number(amountStr) || 0;
+    if (!pendingOp && amount <= 0) return;
+    paymentInFlight.current = true;
     setBusy(true);
+    // Idempotence : une opération dont l'issue est incertaine reprend
+    // sa clé et ses paramètres figés ; une nouvelle opération reçoit
+    // une clé neuve. Persistée pour survivre au rechargement.
+    const op =
+      pendingOp ?? {
+        reservationId: order.id,
+        key: crypto.randomUUID(),
+        method,
+        amount: amount.toFixed(2),
+      };
+    setPendingOp(op);
+    savePosPending(op, sessionStorage);
     try {
-      const res = await fetch(`${API}/reservations/${order.id}/payments`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ method, amount: amount.toFixed(2) }),
-      });
+      const res = await fetch(
+        `${API}/reservations/${op.reservationId}/payments`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            method: op.method,
+            amount: op.amount,
+            idempotency_key: op.key,
+          }),
+        }
+      );
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if (res.status >= 500) {
+          // Erreur serveur : issue incertaine — la clé est conservée,
+          // le prochain essai reprendra cette même opération.
+          toast.error(
+            "Erreur serveur : le résultat de l'encaissement est incertain — réessayez."
+          );
+          return;
+        }
+        // Rejet métier certain (4xx) : l'opération est close, la clé
+        // est libérée ; la commande est relue pour refléter son état
+        // réel (elle a pu être annulée ou expirer entre-temps).
+        setPendingOp(null);
+        clearPosPending(sessionStorage);
+        try {
+          const chk = await fetch(`${API}/reservations/${order.id}`, {
+            cache: "no-store",
+          });
+          if (chk.ok) applyReservation(await chk.json());
+        } catch {
+          // Statut local conservé — l'erreur métier reste affichée.
+        }
         toast.error(body.detail ?? `Erreur ${res.status} au paiement.`);
         return;
       }
+      setPendingOp(null);
+      clearPosPending(sessionStorage);
       const change = Number(body.change_due);
       setPayments((prev) => [
         ...prev,
         {
-          method,
+          method: op.method,
           amount: Number(body.payment.amount),
           applied: Number(body.payment.applied_amount),
           change,
@@ -510,14 +684,22 @@ export function PosTerminal({
       }
       setAmountStr(body.amount_due > 0 ? String(body.amount_due) : "");
     } catch {
-      toast.error("Serveur inaccessible.");
+      // Erreur réseau/timeout : le serveur a peut-être enregistré
+      // l'opération — clé et paramètres conservés pour la reprise.
+      toast.error(
+        "Connexion perdue : résultat de l'encaissement incertain — réessayez avant de modifier le montant."
+      );
     } finally {
+      paymentInFlight.current = false;
       setBusy(false);
     }
   }
 
   async function cancelOrder() {
-    if (!order || order.status !== "pending" || busy) return;
+    // Annulation interdite tant qu'un encaissement est incertain : la
+    // tranche a peut-être été enregistrée — il faut d'abord la résoudre.
+    if (!order || order.status !== "pending" || busy || pendingOp)
+      return;
     setBusy(true);
     try {
       const res = await fetch(
@@ -532,6 +714,8 @@ export function PosTerminal({
       const refunded = order.paid;
       setOrder(null);
       setPayments([]);
+      setPendingOp(null);
+      clearPosPending(sessionStorage);
       setAmountStr("");
       toast.success(
         refunded > 0
@@ -547,6 +731,12 @@ export function PosTerminal({
   }
 
   function reset() {
+    if (pendingOp || restoreBlocked) {
+      toast.error(
+        "Encaissement en attente — résolvez-le avant de repartir sur une nouvelle vente."
+      );
+      return;
+    }
     setLines([]);
     setOrder(null);
     setPayments([]);
@@ -747,7 +937,7 @@ export function PosTerminal({
             <Button
               variant="outline"
               size="sm"
-              disabled={busy}
+              disabled={busy || pendingOp !== null}
               onClick={cancelOrder}
             >
               <Pencil className="size-4" />
@@ -755,7 +945,12 @@ export function PosTerminal({
             </Button>
           )}
           {order && (
-            <Button variant="outline" size="sm" onClick={reset}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || pendingOp !== null}
+              onClick={reset}
+            >
               <RotateCcw className="size-4" />
               Nouvelle vente
             </Button>
@@ -763,6 +958,35 @@ export function PosTerminal({
         </div>
       </div>
 
+      {restoreBlocked && (
+        <div className="flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-950/40">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-red-700 dark:text-red-300" />
+          <div className="space-y-1.5 text-sm">
+            <p className="font-medium">
+              Encaissement non vérifié :{" "}
+              {PAYMENT_METHODS.find((m) => m.key === restoreBlocked.method)
+                ?.label ?? restoreBlocked.method}{" "}
+              {eurFormatter.format(Number(restoreBlocked.amount))} —
+              commande {restoreBlocked.reservationId.slice(0, 8)}…
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Le résultat de cet encaissement n&apos;a pas pu être établi.
+              La caisse reste bloquée : aucune nouvelle vente ne peut
+              démarrer tant que la commande n&apos;est pas vérifiée.
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              onClick={() => setRestoreTick((t) => t + 1)}
+            >
+              Revérifier la commande
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {!restoreBlocked && (
       <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr_1fr] print:hidden">
         {/* ------------------------------ Produits ------------------------- */}
         <Card>
@@ -939,7 +1163,35 @@ export function PosTerminal({
               </div>
             </div>
 
-            {order && order.status !== "confirmed" && (
+            {order && order.status !== "confirmed" && pendingOp && (
+              <>
+                {/* Tranche incertaine : paramètres figés, même clé au
+                    réessai — jamais de modification avant résolution. */}
+                <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-700 dark:bg-amber-950/40">
+                  <p className="font-medium">
+                    Encaissement en attente :{" "}
+                    {PAYMENT_METHODS.find((m) => m.key === pendingOp.method)
+                      ?.label ?? pendingOp.method}{" "}
+                    {eurFormatter.format(Number(pendingOp.amount))}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Résultat incertain — les paramètres sont figés.
+                    Réessayez l&apos;encaissement ; il sera rejoué ou
+                    enregistré une seule fois.
+                  </p>
+                </div>
+                <Button
+                  className="w-full"
+                  disabled={busy}
+                  onClick={pay}
+                >
+                  {busy && <Loader2 className="size-4 animate-spin" />}
+                  Réessayer l&apos;encaissement
+                </Button>
+              </>
+            )}
+
+            {order && order.status !== "confirmed" && !pendingOp && (
               <>
                 <div className="grid grid-cols-4 gap-1.5">
                   {PAYMENT_METHODS.map(({ key, label, icon: Icon }) => {
@@ -1080,6 +1332,7 @@ export function PosTerminal({
           </CardContent>
         </Card>
       </div>
+      )}
 
       {showTickets && tickets.length > 0 && (
         <Card className="print:gap-0 print:py-0 print:ring-0">

@@ -48,10 +48,17 @@ class PaymentCreate(BaseModel):
     `amount` = montant nominal remis par le client. Pour les espèces et
     les chèques-vacances, il peut excéder le reste à payer (rendu pour
     le cash, excédent perdu pour l'ANCV).
+
+    `idempotency_key` (obligatoire) identifie l'opération logique :
+    générée par le client (UUID v4) au début de chaque nouvel
+    encaissement, réutilisée telle quelle pour rejouer la même opération
+    après une réponse incertaine (timeout, coupure réseau). Une même
+    clé avec un contenu différent est rejetée (409).
     """
 
     method: PaymentMethod
     amount: Decimal = Field(gt=0, decimal_places=2)
+    idempotency_key: uuid.UUID
 
 
 class PaymentRead(BaseModel):
