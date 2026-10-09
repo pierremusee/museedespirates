@@ -104,6 +104,7 @@ musee/
 │       ├── test_reservation_rules.py
 │       ├── test_reservation_flow.py
 │       ├── test_payments.py
+│       ├── test_input_bounds.py
 │       ├── test_scan.py
 │       └── test_purge.py
 └── frontend/
@@ -341,6 +342,26 @@ avec bouton « Revérifier »).
   `group_size` obligatoire sur produit `kind = group`, interdit ailleurs.
 - Tarif : `price_adult` du produit = prix par personne.
 
+### Bornes d'entrée (montants et quantités)
+
+Une commande couvre au plus **120 personnes**
+(`MAX_PERSONS_PER_RESERVATION` — repères : jauge de séance seedée ~80,
+« capacité de 120 » de la spec OBJECTIFS §17) et **10 lignes**
+(`MAX_ITEMS_PER_RESERVATION` — le catalogue actif en compte moins).
+Une tranche d'encaissement est plafonnée à **50 000 €**
+(`MAX_PAYMENT_AMOUNT`, sous la capacité `Numeric(10,2)` =
+99 999 999,99 € — dépassement PostgreSQL impossible).
+`customer_email` est déjà borné à 254 caractères par `EmailStr`
+(RFC 5321) — sous la colonne `String(320)`.
+
+Champ hors borne → **422** (Pydantic) ; total de personnes dépassé en
+agrégat par des lignes individuellement valides → **400** en service,
+comme « capacité insuffisante ». `session_ids` reste borné par la
+règle métier (nombre exact de slots). Sans ces bornes, une valeur
+extrême débordait la colonne PostgreSQL (500 évitable) ou déclenchait
+une création massive de billets sur les produits sans jauge — seul
+vecteur réel, les produits à séance étant déjà bornés par la jauge.
+
 ### Pass « Journée »
 
 Tout produit contenant `museum_day` + séance(s) impose `visit_date` = jour
@@ -455,7 +476,7 @@ psql postgresql://postgres:password@localhost:5432/postgres \
   -c "CREATE DATABASE musee_test"
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/musee_test \
   alembic upgrade head
-pytest                       # 118 tests métier — isolation : transaction
+pytest                       # 131 tests métier — isolation : transaction
                              # rollbackée par test, jamais de seed nécessaire
 pytest --cov=app --cov-report=term-missing --cov-report=xml
                              # coverage (plancher 65 % — pyproject.toml)
@@ -488,14 +509,19 @@ fonctionnellement sur séance cap-1, encaissements conservés, rejets
 `/seasonal/check` (BS/HS cohérents avec le seed) et
 `/reservations/{id}` (graphe complet relu + 404) — smoke HTTP qui
 garantit la sérialisation des `response_model` sans lazy-loading
-(`MissingGreenlet`). **Depuis 2026-10-08, chaque appel est une assertion bloquante**
+(`MissingGreenlet`), **bornes d'entrée** (test 13 : champs hors borne
+→ 422 HTTP, agrégat > 120 personnes → 400, borne 120 exacte acceptée).
+**Depuis 2026-10-08, chaque appel est une assertion bloquante**
 (helper `expect`) : les rejets autrefois affichés sans vérification et les
 gardes `if status == 201:` qui sautaient les assertions en cas d'échec ont
 été éliminés — une régression métier fait échouer la suite (prouvé par
 régression temporaire sur le refus ANCV/web). Jours de test **relatifs** :
 `HIGH_DAY`=J+45 couvert par « HS test » ; `LOW_DAY` est **choisi au seed**
 hors de toute `SeasonalPeriod` existante et hors de la fenêtre « HS test »
-(reproductible toute l'année, y compris en juillet-août).
+(reproductible toute l'année, y compris en juillet-août). Les séances
+« du jour » du seed sont bornées au jour civil Paris (`session_today`) :
+`now±Xh` pouvait basculer sur le jour voisin entre 23h et 0h20 locales,
+rendant la séance invendable/non scannable.
 
 `test_concurrency.py` (M1 + idempotence 2026-10-09) démontre sous
 concurrence réelle (threads + barrière, requêtes simultanées) :
@@ -521,7 +547,7 @@ run ; les deux branches sont exercées de façon **déterministe** par
 `test_payments.py` (commit concurrent injecté depuis une seconde
 connexion). Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-09) : `backend/tests/` — 118 tests en
+**Suite métier pytest** (2026-10-09) : `backend/tests/` — 131 tests en
 ~21 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
@@ -571,6 +597,13 @@ couvre en plus catégorie manquante, incohérence `visit_date`/séance du
 Pass et catalogue corrompu (produit sans droit, composant musée sans
 événement, événement inactif, groupe sans tarif) ; `test_pricing.py`
 couvre les tarifs famille et groupe, basse et haute saison.
+`test_input_bounds.py` : bornes d'entrée — montant à la borne (50 000 €
+accepté), juste au-dessus et valeur extrême rejetés en `ValidationError`
+(422 en HTTP), `group_size`/`extra_children` au plafond et au-delà,
+dépassement de la capacité `Integer` rejeté avant insertion, 11 lignes
+refusées / 10 acceptées, email > 320 car. refusé, plafond agrégé de 120
+personnes vérifié en service (400) et borne incluse (groupe de 120
+créé).
 `test_purge.py` : TTL 15 min sous horloge figée — `pending` expiré
 libère la jauge, `pending` récent / `confirmed` / `cancelled` anciens
 conservés, sélectivité sur séance partagée, restitution multi-items et
@@ -839,6 +872,17 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   scénario 8 de `test_concurrency.py` prouve E2E le **contrat** de la
   course (201 + 409, un seul encaissement, perdant intègre et
   soldable) sans garantir la branche empruntée à chaque run.
+- ✅ **Audit — bornes d'entrée** (2026-10-09, AUDIT-008) : montants et
+  quantités non bornés → dépassements `Numeric(10,2)`/`Integer`
+  évitables (500) et création massive de billets possible sur les
+  produits sans jauge (`customer_email` était déjà borné à 254 car.
+  par `EmailStr` < colonne 320). Bornes métier décidées :
+  **120 personnes** par commande (spec §17, jauge seedée ~80),
+  **10 lignes**, **50 000 €** par tranche. Champs hors borne → 422 ;
+  agrégat de personnes > 120 → 400 en service
+  (`test_input_bounds.py` : 13 tests ; `test_booking.py` test 13 :
+  preuve HTTP). Limites restantes : borne par champ, pas de borne
+  temporelle ni de rate-limiting (hors périmètre M5 sécurité).
 
 ### Backlog (feuille de route non figée)
 

@@ -10,6 +10,24 @@ from app.models.reservation_item import FreeProfile
 from app.models.ticket import TicketCategory
 from app.schemas.ticket import TicketAccessRead
 
+# Bornes d'entrée (anti-débordement, anti-DoS) — limites métier, pas
+# techniques arbitraires :
+# - une commande couvre au plus MAX_PERSONS_PER_RESERVATION personnes
+#   (repères : jauge de séance seedée ~80, « capacité de 120 » dans la
+#   spec — OBJECTIFS.md §17) — chaque personne émet des billets et les
+#   produits sans jauge n'ont pas d'autre borne ;
+# - une commande compte au plus MAX_ITEMS_PER_RESERVATION lignes
+#   (le catalogue actif en compte moins de 10) ;
+# - une tranche d'encaissement est plafonnée à 50 000 €, sous la
+#   capacité Numeric(10,2) = 99 999 999,99 € — aucun dépassement
+#   PostgreSQL possible.
+# Les bornes par champ échouent en 422 (Pydantic) ; le total de
+# personnes est aussi re-vérifié en agrégé par reservation_service,
+# car des lignes individuellement valides peuvent le dépasser.
+MAX_ITEMS_PER_RESERVATION = 10
+MAX_PERSONS_PER_RESERVATION = 120
+MAX_PAYMENT_AMOUNT = Decimal("50000.00")
+
 
 class ReservationItemCreate(BaseModel):
     """Une ligne de panier : un produit du catalogue + ses paramètres.
@@ -31,15 +49,23 @@ class ReservationItemCreate(BaseModel):
     visit_date: date | None = None
     session_id: uuid.UUID | None = None
     session_ids: list[uuid.UUID] = Field(default_factory=list)
-    extra_children: int = Field(default=0, ge=0)
-    group_size: int | None = Field(default=None, ge=1)
+    extra_children: int = Field(
+        default=0, ge=0, le=MAX_PERSONS_PER_RESERVATION
+    )
+    group_size: int | None = Field(
+        default=None, ge=1, le=MAX_PERSONS_PER_RESERVATION
+    )
     free_profile: FreeProfile | None = None
 
 
 class ReservationCreate(BaseModel):
+    # EmailStr borne déjà l'adresse à 254 car. (RFC 5321) — sous la
+    # capacité de la colonne String(320) : aucun dépassement possible.
     customer_email: EmailStr
     channel: SalesChannel = SalesChannel.WEB
-    items: list[ReservationItemCreate] = Field(min_length=1)
+    items: list[ReservationItemCreate] = Field(
+        min_length=1, max_length=MAX_ITEMS_PER_RESERVATION
+    )
 
 
 class PaymentCreate(BaseModel):
@@ -57,7 +83,9 @@ class PaymentCreate(BaseModel):
     """
 
     method: PaymentMethod
-    amount: Decimal = Field(gt=0, decimal_places=2)
+    amount: Decimal = Field(
+        gt=0, le=MAX_PAYMENT_AMOUNT, decimal_places=2
+    )
     idempotency_key: uuid.UUID
 
 

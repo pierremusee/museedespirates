@@ -32,6 +32,7 @@ from app.models.session import LATE_TOLERANCE, Session
 from app.models.ticket import Ticket, TicketCategory, TicketType
 from app.models.ticket_access import TicketAccess
 from app.schemas.reservation import (
+    MAX_PERSONS_PER_RESERVATION,
     PaymentCreate,
     PaymentResult,
     ReservationCreate,
@@ -292,6 +293,7 @@ async def create_reservation(
     # --- Validation structurelle + collecte des séances à verrouiller ---
     plans: list[dict] = []
     all_session_ids: set[uuid.UUID] = set()
+    total_persons = 0
     for item_in in data.items:
         product = products[item_in.product_code]
         components = product.components
@@ -343,12 +345,24 @@ async def create_reservation(
         # séance, dans l'ordre (même mapping pour toutes les personnes).
         session_slots = _session_slots(product, session_ids)
 
+        # Plafond agrégé : les bornes par champ (422) ne suffisent pas —
+        # des lignes individuellement valides peuvent dépasser en somme
+        # le maximum de personnes qu'une commande peut couvrir.
+        persons = _persons(item_in, product)
+        total_persons += len(persons)
+        if total_persons > MAX_PERSONS_PER_RESERVATION:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Une commande ne peut pas couvrir plus de "
+                f"{MAX_PERSONS_PER_RESERVATION} personnes",
+            )
+
         all_session_ids.update(session_ids)
         plans.append(
             {
                 "item_in": item_in,
                 "product": product,
-                "persons": _persons(item_in, product),
+                "persons": persons,
                 "session_ids": session_ids,
                 "session_slots": session_slots,
                 "has_museum_day": has_museum_day,

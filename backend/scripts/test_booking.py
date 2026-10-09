@@ -154,23 +154,39 @@ async def seed() -> dict:
         # Jauge 1 dédiée au test d'annulation (tiny reste occupée par la
         # commande pending du test 5 jusqu'à la purge).
         cancel_sess = Session(event_id=kraken.id, start_time=session_at(low_day, 20, 0), max_capacity=1)
+        # Séances « du jour » (jour civil Europe/Paris) : now+1h/3h peut
+        # basculer sur le lendemain après 23h locales, et now-20min peut
+        # rester « hier » après minuit — or la vente et le scan d'une
+        # séance exigent le même jour civil. Repli : borne dans la
+        # journée en cours.
+        now_utc = datetime.now(UTC)
+        paris_today = datetime.now(MUSEUM_TZ).date()
+
+        def session_today(offset: timedelta, fallback: time) -> datetime:
+            start = now_utc + offset
+            if start.astimezone(MUSEUM_TZ).date() != paris_today:
+                start = session_at(
+                    paris_today, fallback.hour, fallback.minute
+                )
+            return start
+
         # Séance "aujourd'hui" pour tester le scan de billets session_ticket.
         today_sess = Session(
             event_id=kraken.id,
-            start_time=datetime.now(UTC) + timedelta(hours=1),
+            start_time=session_today(timedelta(hours=1), time(23, 59)),
             max_capacity=10,
         )
         # Seconde séance du jour : séance supplémentaire à tarif réduit.
         today_sess2 = Session(
             event_id=kraken.id,
-            start_time=datetime.now(UTC) + timedelta(hours=3),
+            start_time=session_today(timedelta(hours=3), time(23, 58)),
             max_capacity=10,
         )
         # Fenêtre de vente = tolérance du contrôle (30 min) : une séance
         # commencée depuis 20 min (vendable) et une expirée (refusée).
         recent = Session(
             event_id=kraken.id,
-            start_time=datetime.now(UTC) - timedelta(minutes=20),
+            start_time=session_today(timedelta(minutes=-20), time(0, 0)),
             max_capacity=10,
         )
         expired = Session(
@@ -839,6 +855,68 @@ async def main() -> None:
     expect(get(f"{BASE_URL}/reservations/{uuid.uuid4()}"),
            404, "test 12c — réservation inconnue")
     print("   => graphe complet sérialisé, 404 propre sur inconnu")
+
+    print("\nTest 13 — bornes d'entrée : montants et quantités "
+          "(422 propre, jamais 500) :")
+    # AUDIT-008 : un champ hors borne est rejeté en 422 par le schéma —
+    # avant, une valeur extrême débordait la colonne PostgreSQL (500)
+    # ou déclenchait une création massive de billets.
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "group_visit", "group_size": 121,
+                   "visit_date": today}],
+    })
+    assert s == 422, f"groupe de 121 personnes accepté ({s})"
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}] * 11,
+    })
+    assert s == 422, f"commande de 11 lignes acceptée ({s})"
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "a" * 310 + "@pirates-tres-long.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}],
+    })
+    # EmailStr borne l'adresse à 254 car. (RFC 5321) < colonne 320.
+    assert s == 422, f"email > 254 caractères accepté ({s})"
+
+    resa_b = expect(post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}],
+    }), 201, "test 13 — commande de référence")
+    s, _ = pay(resa_b["id"], "cash", "50000.01")
+    assert s == 422, f"tranche > 50 000 € acceptée ({s})"
+    s, _ = pay(resa_b["id"], "cash", "99999999999")
+    assert s == 422, f"montant débordant Numeric accepté ({s})"
+
+    # Borne incluse : 120 personnes, produit groupe sans jauge.
+    s, resa_g = post(f"{BASE_URL}/reservations", {
+        "customer_email": "scolaire@ecole-pirates.fr",
+        "channel": "pos",
+        "items": [{"product_code": "group_visit", "group_size": 120,
+                   "visit_date": today}],
+    })
+    assert s == 201, f"groupe de 120 refusé ({s})"
+    assert Decimal(resa_g["total_price"]) == Decimal("1200.00")
+
+    # Deux lignes valides en champ mais 60 + 61 > 120 en agrégat → 400.
+    s, detail = post(f"{BASE_URL}/reservations", {
+        "customer_email": "scolaire@ecole-pirates.fr",
+        "channel": "pos",
+        "items": [
+            {"product_code": "group_visit", "group_size": 60,
+             "visit_date": today},
+            {"product_code": "group_visit", "group_size": 61,
+             "visit_date": today},
+        ],
+    })
+    assert s == 400 and "120" in str(detail), (
+        f"agrégat > 120 personnes accepté ({s})"
+    )
+    print("=> OK : 422 sur champs hors borne, 400 sur agrégat > 120 "
+          "personnes, borne 120 exacte acceptée")
 
 
 async def run() -> None:
