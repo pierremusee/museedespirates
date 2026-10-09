@@ -511,11 +511,15 @@ différents en concurrence → 201 + 409, une seule empreinte honorée** ;
 au reste (excédent perdu, DFC n°7), total imputé exact** ; **4 tranches
 cash concurrentes à clés distinctes → 4 enregistrements, solde exact** ;
 **même clé sur 2 réservations à séance soldées → 201 + 409, un seul
-encaissement, perdant sans état partiel** (régression couverte :
-l'autoflush de `_emit_tickets` laissait échapper l'IntegrityError en
-500) et **l'accès émis porte `session_start`/`session_event_title`
-renseignés** (cohérents avec la relecture GET). Seed idempotent,
-relançable à volonté.
+encaissement, perdant sans état partiel puis soldable avec une clé
+neuve** ; le corps du 201 (snapshot `response` figé en base) et la
+relecture GET portent les mêmes `session_start`/`session_event_title`
+renseignés. Ce scénario prouve le **contrat** de la course — la branche
+qui produit le 409 (second lookup sous le verrou ou récupération après
+`IntegrityError`) dépend du timing réel et n'est pas garantie à chaque
+run ; les deux branches sont exercées de façon **déterministe** par
+`test_payments.py` (commit concurrent injecté depuis une seconde
+connexion). Seed idempotent, relançable à volonté.
 
 **Suite métier pytest** (2026-10-09) : `backend/tests/` — 118 tests en
 ~21 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
@@ -558,8 +562,11 @@ aucune duplication de billets en base au rejeu, invariant « canal web
 **snapshot figé cohérent avec la relecture GET** — `session_start`/
 `session_event_title` renseignés, rejeu fidèle — et **branches de
 récupération de course exercées** par injection d'un commit concurrent
-depuis une seconde connexion : `IntegrityError` au flush et clé
-commitée pendant le `FOR UPDATE` → 409, perdant sans état partiel) ; `test_reservation_rules.py`
+depuis une seconde connexion : `IntegrityError` au flush (**régression
+AUDIT-001 — échec prouvé sur l'ancien code**) et clé commitée pendant
+le `FOR UPDATE` (couverture d'une branche déjà correcte — le test passe
+aussi avant la correction) → 409 d'empreinte, perdant sans état
+partiel) ; `test_reservation_rules.py`
 couvre en plus catégorie manquante, incohérence `visit_date`/séance du
 Pass et catalogue corrompu (produit sans droit, composant musée sans
 événement, événement inactif, groupe sans tarif) ; `test_pricing.py`
@@ -828,8 +835,10 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   rejeu → relation peuplée à l'émission (séance et événement déjà
   chargés, aucune requête en plus). Les deux branches de récupération
   (IntegrityError au flush, clé commitée pendant le `FOR UPDATE`) sont
-  exercées par injection d'un commit concurrent ; la course réelle est
-  démontrée E2E sur le nouveau scénario de `test_concurrency.py`.
+  exercées par injection d'un commit concurrent — déterministe ; le
+  scénario 8 de `test_concurrency.py` prouve E2E le **contrat** de la
+  course (201 + 409, un seul encaissement, perdant intègre et
+  soldable) sans garantir la branche empruntée à chaque run.
 
 ### Backlog (feuille de route non figée)
 

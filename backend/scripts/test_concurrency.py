@@ -489,8 +489,12 @@ async def main() -> None:
     # Régression AUDIT-001 : même clé sur deux réservations comportant
     # une séance, l'encaissement soldant la commande — l'autoflush
     # déclenché par _emit_tickets laissait échapper l'IntegrityError
-    # (500 au lieu de 409). Le perdant ne doit laisser aucun état
-    # partiel : ni paiement, ni billet, commande encore pending.
+    # (500 au lieu de 409). Ce qui est déterministe ici, c'est le
+    # CONTRAT : un 201, un 409, un seul encaissement, aucun état
+    # partiel. La branche qui produit le 409 (second lookup sous le
+    # verrou ou récupération après IntegrityError) dépend du timing
+    # réel de la course — les deux branches sont exercées
+    # déterministiquement par tests/test_payments.py.
     print("\nCourse de clé à séance : même clé, commandes soldées")
     resa_ids = []
     for i in range(2):
@@ -519,6 +523,12 @@ async def main() -> None:
     print(f"Résultats : {codes}")
     assert codes == [201, 409], \
         f"attendu 1 succès + 1 conflit, obtenu {codes}"
+    winner_resp = next(b for s, b in race if s == 201)
+    loser_resp = next(b for s, b in race if s == 409)
+    # Le 409 doit provenir du rejet d'empreinte d'idempotence, pas
+    # d'un autre conflit (ex. émission impossible).
+    assert "opération différente" in loser_resp.get("detail", ""), \
+        f"409 inattendu : {loser_resp}"
     details = []
     for rid in resa_ids:
         s, detail = get(f"{BASE_URL}/reservations/{rid}")
@@ -529,15 +539,29 @@ async def main() -> None:
     winner = next(d for d in details if d["payments"])
     loser = next(d for d in details if not d["payments"])
     assert winner["status"] == "confirmed" and len(winner["tickets"]) == 1
-    # L'accès émis porte les informations de sa séance (snapshot +
-    # relecture identiques — AUDIT-007).
-    sess_access = winner["tickets"][0]["accesses"][0]
-    assert sess_access["session_id"] == ids["session_pay"]
-    assert sess_access["session_start"] is not None
-    assert sess_access["session_event_title"] == \
+    # AUDIT-007 : le corps du 201 EST le snapshot `response` figé en
+    # base — ses champs de séance doivent être renseignés, et la
+    # relecture GET doit restituer les mêmes valeurs.
+    snap_access = winner_resp["tickets"][0]["accesses"][0]
+    assert snap_access["session_id"] == ids["session_pay"]
+    assert snap_access["session_start"] is not None
+    assert snap_access["session_event_title"] == \
         "Concurrence Théâtre (test)"
+    get_access = winner["tickets"][0]["accesses"][0]
+    assert get_access["session_start"] == snap_access["session_start"]
+    assert get_access["session_event_title"] == \
+        snap_access["session_event_title"]
     assert loser["status"] == "pending" and loser["tickets"] == []
-    print("=> OK : 201 + 409 sur commandes à séance, aucun état partiel")
+    # Le perdant reste encaissable avec une clé nouvelle : la tentative
+    # rejetée n'a laissé ni verrou ni état résiduel.
+    s, retry = post(
+        f"{BASE_URL}/reservations/{loser['id']}/payments",
+        {"method": "cash", "amount": "10.00",
+         "idempotency_key": str(uuid.uuid4())},
+    )
+    assert s == 201 and retry["reservation_status"] == "confirmed", retry
+    print("=> OK : 201 + 409 sur commandes à séance, snapshot fidèle, "
+          "perdant soldable")
 
     print("\nConcurrence démontrée : anti-surbooking, anti double-scan, "
           "idempotence des paiements.")

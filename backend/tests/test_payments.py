@@ -710,7 +710,8 @@ async def test_collision_cle_au_flush_recuperee_409(
     # La même clé est commitée par un concurrent pendant notre flush :
     # IntegrityError sur l'index unique → rollback → relecture de
     # l'opération gagnante → 409 (empreinte différente), et aucun état
-    # partiel côté perdant.
+    # partiel côté perdant. Échec prouvé sur l'ancien code : l'INSERT
+    # échappait au périmètre de récupération via l'autoflush.
     resa = await _resa_a_seance(db, catalog)
     key = uuid.uuid4()
     winner_resa_id: uuid.UUID | None = None
@@ -731,6 +732,9 @@ async def test_collision_cle_au_flush_recuperee_409(
                 db, resa.id, pay("10.00", PaymentMethod.CASH, key=key)
             )
         assert exc.value.status_code == 409
+        # Le rejet vient du conflit d'empreinte, pas d'un autre 409
+        # (ex. émission « billets non émis »).
+        assert "opération différente" in exc.value.detail
     finally:
         if winner_resa_id is not None:
             await _delete_committed(external_engine, winner_resa_id)
@@ -749,7 +753,11 @@ async def test_cle_commitee_pendant_le_verrou_recuperee_409(
     # Course vue du côté « second lookup sous FOR UPDATE » : la clé est
     # commitée entre le chemin rapide et l'acquisition du verrou — le
     # rejeu de l'opération gagnante (ici 409, autre réservation) doit
-    # primer sur la garde « déjà soldée ».
+    # primer sur la garde « déjà soldée ». Couverture déterministe
+    # d'une branche jusque-là non exercée : elle existait et
+    # fonctionnait déjà avant la correction AUDIT-001 — ce test passe
+    # aussi sur l'ancien code et ne prouve pas le fix, il verrouille
+    # la branche de récupération.
     resa = await _resa_a_seance(db, catalog)
     key = uuid.uuid4()
     winner_resa_id: uuid.UUID | None = None
@@ -775,6 +783,7 @@ async def test_cle_commitee_pendant_le_verrou_recuperee_409(
                 db, resa.id, pay("10.00", PaymentMethod.CASH, key=key)
             )
         assert exc.value.status_code == 409
+        assert "opération différente" in exc.value.detail
     finally:
         if winner_resa_id is not None:
             await _delete_committed(external_engine, winner_resa_id)

@@ -25,7 +25,7 @@ croissant d'exigence :
 Règle : écrire une documentation n'est pas une preuve ; une CI verte ne prouve
 que les tests présents ; une simulation n'est pas une expérience réelle.
 
-## Position actuelle — évaluation du 2026-10-06
+## Position actuelle — évaluation du 2026-10-09
 
 | Niveau (OBJECTIFS.md §20) | Statut |
 |---|---|
