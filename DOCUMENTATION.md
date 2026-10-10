@@ -224,10 +224,16 @@ pending ──(solde = 0 via payments, ou total = 0 €)──> confirmed  → b
   `SeasonalPeriod`.
 - `computed_price` et `season_modifier` figés par item (traçabilité).
 - **Produits add-on** (`is_addon`, ex. `extra_show`) : chaque personne
-  add-on doit être couverte par un produit non-add-on accordant le même
-  droit dans la même commande, sinon **400**. Sans cette règle,
-  « musée + séance supp. » (17 €) court-circuiterait le Pass (20 €) et
-  `extra_show` seul le billet théâtre plein tarif.
+  add-on doit être couverte, dans la même commande, par une personne
+  de produit non-add-on accordant le même droit, **de même catégorie
+  tarifaire et même profil de gratuité** — l'identité d'une personne
+  est le couple `(catégorie, free_profile)`, comme pour la fusion des
+  billets. Sinon **400**. Sans cette règle,
+  « musée + séance supp. » (17 €) court-circuiterait le Pass (20 €),
+  `extra_show` seul le billet théâtre plein tarif — et des billets
+  adultes couvriraient des suppléments enfants (défaut corrigé
+  2026-10-10 : la couverture n'était clés que par type de droit, sans
+  distinction de catégorie ni de profil).
 - **Cohérence de grille** : `pass_2_shows` reste strictement sous
   `pass_1_show + extra_show` par catégorie (24/16/18 < 25/16,50/19 €) —
   le pass groupé est toujours la meilleure offre.
@@ -360,9 +366,10 @@ plafonnée à **50 000 €**
 comptent — un individuel = 1, une famille = 4 + `extra_children`, un
 groupe = `group_size`. Les produits `is_addon` (séance
 supplémentaire…) **ne comptent pas** : la règle de couverture impose
-déjà qu'ils portent des accès pour des personnes couvertes par un
-produit de base de la même commande — ce sont des accès
-supplémentaires, pas des personnes en plus. La capacité des séances
+déjà qu'ils portent des accès pour des personnes couvertes, à
+catégorie et profil identiques, par un produit de base de la même
+commande — ce sont des accès supplémentaires, pas des personnes en
+plus. La capacité des séances
 reste décomptée par accès réel (`_session_slots`), indépendamment.
 
 Champ hors borne → **422** (Pydantic) ; total de personnes dépassé en
@@ -487,7 +494,7 @@ psql postgresql://postgres:password@localhost:5432/postgres \
   -c "CREATE DATABASE musee_test"
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/musee_test \
   alembic upgrade head
-pytest                       # 138 tests métier — isolation : transaction
+pytest                       # 155 tests métier — isolation : transaction
                              # rollbackée par test, jamais de seed nécessaire
 pytest --cov=app --cov-report=term-missing --cov-report=xml
                              # coverage (plancher 65 % — pyproject.toml)
@@ -568,8 +575,8 @@ run ; les deux branches sont exercées de façon **déterministe** par
 `test_payments.py` (commit concurrent injecté depuis une seconde
 connexion). Seed idempotent, relançable à volonté.
 
-**Suite métier pytest** (2026-10-10) : `backend/tests/` — 138 tests en
-~21 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
+**Suite métier pytest** (2026-10-10) : `backend/tests/` — 155 tests en
+~40 s contre PostgreSQL réel (`musee_test`, créée à part, jamais de
 données de dev). Isolation : chaque test tourne dans une transaction
 externe rollbackée (`join_transaction_mode="create_savepoint"` — les
 `commit()` internes des services libèrent un savepoint, le rollback final
@@ -579,7 +586,11 @@ basse saison) et `high_season` ; `factories.py` les helpers de création.
 `test_reservation_rules.py` : matrice de validation de `create_reservation`
 (20 rejets auparavant ni testés ni exercés : `free_profile` sur famille/
 groupe, `disability` sans catégorie, PMR sans porteur, add-on sans droit
-de base, séance expirée, capacité…). `test_reservation_flow.py` : flux
+de base, séance expirée, capacité…) — complétée par la matrice de
+**couverture des add-ons par personne** (2026-10-10, correction P1 :
+le supplément d'un enfant, d'un réduit ou d'un profil gratuit exige un
+billet de base de même catégorie/profil ; famille et groupe couverts ;
+rejet sans effet de bord sur la jauge ni la commande). `test_reservation_flow.py` : flux
 complet pending → payé → billets (fusion gloutonne par catégorie),
 annulation (restitution de jauge, encaissements conservés, rejets).
 `test_scan.py` : contrôle d'accès `scan_ticket` — 404, mauvais poste
