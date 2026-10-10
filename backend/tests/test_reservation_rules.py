@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import func, select
 
 from app.models import (
     ComponentType,
@@ -18,6 +19,7 @@ from app.models import (
     FreeProfile,
     ProductComponent,
     ProductKind,
+    Reservation,
     SalesChannel,
     Session,
 )
@@ -32,6 +34,7 @@ from tests.factories import (
     add_product,
     add_session,
     museum_comp,
+    theater_comp,
 )
 
 
@@ -479,3 +482,460 @@ async def test_groupe_sans_prix_par_personne(db, catalog, today):
         )
     assert e.value.status_code == 400
     assert "prix par personne manquant" in e.value.detail
+
+
+# --- Couverture des add-ons : identité de la personne (P1) --------------
+#
+# Un produit add-on s'achète « pour une personne » : la couverture se
+# vérifie par triplet (type de droit, catégorie tarifaire, profil de
+# gratuité) — la même identité que la fusion des billets. Avant la
+# correction, les compteurs n'étaient clés que par type de droit : un
+# billet adulte couvrait un supplément enfant (régression P1).
+
+
+async def test_addon_enfants_non_couverts_par_adultes(db, catalog):
+    # Scénario P1 rapporté : 6 billets théâtre adultes + 6 suppléments
+    # enfants acceptés à 81 € alors qu'aucun enfant n'a de billet de
+    # base. Rejeté avant tout effet de bord.
+    sess_a = await add_session(db, catalog.theater, days=10, hour=14, cap=20)
+    sess_b = await add_session(db, catalog.theater, days=10, hour=18, cap=20)
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                *[
+                    item(
+                        "theater_show", category="adult",
+                        session_id=sess_a.id,
+                    )
+                    for _ in range(6)
+                ],
+                *[
+                    item(
+                        "extra_show", category="child",
+                        session_id=sess_b.id,
+                    )
+                    for _ in range(6)
+                ],
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "complémentaire" in e.value.detail
+    # Aucune donnée incohérente : jauge intacte, aucune commande créée.
+    await db.refresh(sess_a)
+    await db.refresh(sess_b)
+    assert sess_a.booked_seats == 0
+    assert sess_b.booked_seats == 0
+    n_resas = (
+        await db.execute(select(func.count(Reservation.id)))
+    ).scalar_one()
+    assert n_resas == 0
+
+
+async def test_addon_couvert_par_meme_categorie(db, catalog):
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="child",
+                session_id=catalog.session.id,
+            ),
+            item(
+                "extra_show", category="child",
+                session_id=catalog.session2.id,
+            ),
+        ),
+    )
+    assert resa.total_price == Decimal("10.50")  # 7 + 3.50
+
+
+async def test_commande_mixte_categories_couvertes(db, catalog):
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="adult",
+                session_id=catalog.session.id,
+            ),
+            item(
+                "theater_show", category="child",
+                session_id=catalog.session.id,
+            ),
+            item(
+                "extra_show", category="adult",
+                session_id=catalog.session2.id,
+            ),
+            item(
+                "extra_show", category="child",
+                session_id=catalog.session2.id,
+            ),
+        ),
+    )
+    assert resa.total_price == Decimal("25.50")  # 10 + 7 + 5 + 3.50
+
+
+async def test_addon_reduit_non_couvert_par_adulte(db, catalog):
+    # La catégorie tarifaire est dimensionnante : un billet adulte ne
+    # couvre pas un supplément au tarif réduit.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="adult",
+                    session_id=catalog.session.id,
+                ),
+                item(
+                    "extra_show", category="reduced",
+                    session_id=catalog.session2.id,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+
+
+async def test_couverture_partielle_mixte_rejetee(db, catalog):
+    # 2 adultes + 1 enfant en base : 2 suppléments enfants dépassent la
+    # couverture enfant même si le total des personnes est couvert.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                *[
+                    item(
+                        "theater_show", category="adult",
+                        session_id=catalog.session.id,
+                    )
+                    for _ in range(2)
+                ],
+                item(
+                    "theater_show", category="child",
+                    session_id=catalog.session.id,
+                ),
+                *[
+                    item(
+                        "extra_show", category="adult",
+                        session_id=catalog.session2.id,
+                    )
+                    for _ in range(2)
+                ],
+                *[
+                    item(
+                        "extra_show", category="child",
+                        session_id=catalog.session2.id,
+                    )
+                    for _ in range(2)
+                ],
+            ),
+        )
+    assert e.value.status_code == 400
+
+
+async def test_addon_gratuit_non_couvert_par_base_payante(db, catalog):
+    # Un billet de base payant adulte ne couvre pas le supplément d'un
+    # accompagnateur PMR — le profil de gratuité fait partie de
+    # l'identité de la personne.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="adult",
+                    session_id=catalog.session.id,
+                ),
+                item(
+                    "extra_show",
+                    session_id=catalog.session2.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "complémentaire" in e.value.detail
+
+
+async def test_addon_under4_non_couvert_par_enfant_payant(db, catalog):
+    # Un enfant payant et un moins-de-4-ans sont deux personnes
+    # distinctes : le billet de base de l'un ne couvre pas le
+    # supplément de l'autre.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="child",
+                    session_id=catalog.session.id,
+                ),
+                item(
+                    "extra_show",
+                    session_id=catalog.session2.id,
+                    free_profile=FreeProfile.UNDER_4,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+
+
+async def test_addon_under4_couvert_par_base_under4(db, catalog):
+    # Contre-cas : l'enfant de moins de 4 ans porte son propre billet
+    # de base (gratuit) — le supplément est couvert, panier à 0 €.
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.UNDER_4,
+            ),
+            item(
+                "extra_show",
+                session_id=catalog.session2.id,
+                free_profile=FreeProfile.UNDER_4,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"  # panier à 0 €
+    assert resa.total_price == Decimal(0)
+
+
+async def test_addon_disability_autre_categorie_rejete(db, catalog):
+    # Le profil disability conserve sa catégorie physique : une base
+    # « disability enfant » ne couvre pas un supplément « disability
+    # adulte ».
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="child",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                item(
+                    "extra_show", category="adult",
+                    session_id=catalog.session2.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+
+
+async def test_addon_disability_meme_categorie_couvert(db, catalog):
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="adult",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "extra_show", category="adult",
+                session_id=catalog.session2.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"  # panier à 0 €
+
+
+async def test_addon_pmr_compte_comme_second_accompagnateur(db, catalog):
+    # Comportement préexistant (non modifié par cette correction) : la
+    # règle « 1 accompagnateur PMR par porteur » compte les ITEMS —
+    # le supplément PMR est vu comme un second accompagnateur et reste
+    # rejeté par cette règle indépendamment de la couverture.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="adult",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                item(
+                    "theater_show",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+                item(
+                    "extra_show",
+                    session_id=catalog.session2.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "accompagnateur" in e.value.detail
+
+
+async def test_addon_famille_couvert_par_forfait(db, catalog):
+    # Un forfait famille à séance couvre ses membres par catégorie
+    # physique : 2 adultes + 2 enfants (+ extra_children).
+    await add_product(
+        db,
+        code="family_show",
+        label="Forfait Famille — Spectacle (pytest)",
+        kind=ProductKind.FAMILY,
+        family_base_price=Decimal("40.00"),
+        extra_child_price=Decimal("5.00"),
+        components=[theater_comp()],
+    )
+    resa = await create_reservation(
+        db,
+        order(
+            item("family_show", session_id=catalog.session.id),
+            *[
+                item(
+                    "extra_show", category="adult",
+                    session_id=catalog.session2.id,
+                )
+                for _ in range(2)
+            ],
+            *[
+                item(
+                    "extra_show", category="child",
+                    session_id=catalog.session2.id,
+                )
+                for _ in range(2)
+            ],
+        ),
+    )
+    assert resa.total_price == Decimal("57.00")  # 40 + 2x5 + 2x3.50
+
+
+async def test_addon_famille_musee_seul_rejete(db, catalog, today):
+    # Le forfait famille « musée seul » n'accorde pas le droit séance :
+    # les suppléments de ses membres restent refusés.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item("family_museum", visit_date=today),
+                item(
+                    "extra_show", category="child",
+                    session_id=catalog.session.id,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+
+
+async def test_addon_groupe_couvert_par_groupe(db, catalog):
+    # Un produit add-on de kind=group est couvert par un produit de
+    # base de kind=group accordant le même droit.
+    await add_product(
+        db,
+        code="group_show",
+        label="Séance groupe (pytest)",
+        kind=ProductKind.GROUP,
+        price_adult=Decimal("6.00"),
+        components=[theater_comp()],
+    )
+    await add_product(
+        db,
+        code="group_extra",
+        label="Séance supp. groupe (pytest)",
+        kind=ProductKind.GROUP,
+        is_addon=True,
+        price_adult=Decimal("2.00"),
+        components=[theater_comp()],
+    )
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "group_show", group_size=10,
+                session_id=catalog.session.id,
+            ),
+            item(
+                "group_extra", group_size=8,
+                session_id=catalog.session2.id,
+            ),
+        ),
+    )
+    assert resa.total_price == Decimal("76.00")  # 10x6 + 8x2
+
+
+async def test_addon_groupe_non_couvert_par_individuels(db, catalog, today):
+    # Des billets individuels ne couvrent pas un add-on groupe : les
+    # personnes groupe portent la catégorie « group ».
+    await add_product(
+        db,
+        code="group_museum_extra",
+        label="Journée musée supp. groupe (pytest)",
+        kind=ProductKind.GROUP,
+        is_addon=True,
+        price_adult=Decimal("2.00"),
+        components=[museum_comp(catalog.musee)],
+    )
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                *[
+                    item("museum_entry", category="adult", visit_date=today)
+                    for _ in range(8)
+                ],
+                item(
+                    "group_museum_extra", group_size=8, visit_date=today
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+
+
+async def test_plusieurs_addons_differents_couverts(db, catalog):
+    # Deux add-ons de droits différents pour la même personne : chacun
+    # est couvert par le droit correspondant du pass.
+    await add_product(
+        db,
+        code="museum_extra",
+        label="Journée musée supp. (pytest)",
+        kind=ProductKind.SIMPLE,
+        is_addon=True,
+        price_adult=Decimal("3.00"),
+        price_child=Decimal("2.00"),
+        price_reduced=Decimal("2.00"),
+        components=[museum_comp(catalog.musee)],
+    )
+    day = day_of(catalog.session)
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "pass_1_show", category="adult",
+                visit_date=day, session_id=catalog.session.id,
+            ),
+            item(
+                "extra_show", category="adult",
+                session_id=catalog.session2.id,
+            ),
+            item("museum_extra", category="adult", visit_date=day),
+        ),
+    )
+    assert resa.total_price == Decimal("28.00")  # 20 + 5 + 3
+
+
+async def test_deux_addons_meme_droit_non_empilables(db, catalog):
+    # Une couverture = une unité par personne : une seule personne ne
+    # peut empiler deux suppléments du même droit.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="adult",
+                    session_id=catalog.session.id,
+                ),
+                *[
+                    item(
+                        "extra_show", category="adult",
+                        session_id=catalog.session2.id,
+                    )
+                    for _ in range(2)
+                ],
+            ),
+        )
+    assert e.value.status_code == 400

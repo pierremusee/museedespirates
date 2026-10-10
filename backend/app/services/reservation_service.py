@@ -375,11 +375,14 @@ async def create_reservation(
         )
 
     # Produits « add-on » (is_addon) : droits complémentaires à tarif
-    # réduit — chaque personne add-on doit être couverte par un produit
-    # de base accordant le même droit dans la même commande. Sinon
-    # « musée + séance supp. » (17 €) court-circuiterait le Pass 1
-    # Spectacle (20 €) et `extra_show` seul le billet théâtre plein
-    # tarif.
+    # réduit — chaque personne add-on doit être couverte, dans la même
+    # commande, par une personne de produit de base accordant le même
+    # droit, de même catégorie tarifaire et même profil de gratuité
+    # (l'identité d'une personne est le couple catégorie/profil, comme
+    # pour la fusion des billets dans _emit_tickets). Sinon « musée +
+    # séance supp. » (17 €) court-circuiterait le Pass 1 Spectacle
+    # (20 €), `extra_show` seul le billet théâtre plein tarif — et des
+    # billets adultes couvriraient des suppléments enfants ou gratuits.
     addon_needs: Counter = Counter()
     base_cover: Counter = Counter()
     for plan in plans:
@@ -388,16 +391,24 @@ async def create_reservation(
         }
         target = addon_needs if plan["product"].is_addon else base_cover
         for component_type in granted:
-            target[component_type] += len(plan["persons"])
+            for person_category in plan["persons"]:
+                target[
+                    (
+                        component_type,
+                        person_category,
+                        plan["item_in"].free_profile,
+                    )
+                ] += 1
     if any(
-        needed > base_cover.get(component_type, 0)
-        for component_type, needed in addon_needs.items()
+        needed > base_cover.get(person_key, 0)
+        for person_key, needed in addon_needs.items()
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="La séance supplémentaire est un complément : elle "
-            "exige un billet ou un pass avec séance pour chaque "
-            "personne dans la même commande",
+            detail="Un produit complémentaire exige, pour chaque "
+            "personne concernée, une personne de même catégorie et "
+            "même profil couverte par un billet ou un pass accordant "
+            "le même droit dans la même commande",
         )
 
     # Accompagnateur PMR : max 1 par porteur de carte d'invalidité (DFC n°6).
