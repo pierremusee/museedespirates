@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   absorbIntoPass,
   addProductToCart,
+  addonAccessError,
+  addonCoverageError,
   copiableCounts,
+  coveredSessionIds,
   lineEstimate,
   passSuggestion,
   pmrLineError,
@@ -371,8 +374,32 @@ describe("règle PMR (miroir du moteur métier)", () => {
       line(2, EXTRA_SHOW, counts({ disability: 1, pmr_companion: 1 }), ["s2"]),
     ];
     expect(pmrLineError(ls[0], ls, VISIT)).toBeNull();
-    // Une ligne add-on n'est jamais elle-même en erreur PMR.
+    // L'add-on accompagnateur reste valide : son accès (s2) est aussi
+    // détenu par le porteur via son propre add-on.
     expect(pmrLineError(ls[1], ls, VISIT)).toBeNull();
+  });
+
+  it("rejette un add-on accompagnateur sur une séance sans porteur", () => {
+    // A1 : la co-présence « un point commun » laissait l'accompagnateur
+    // emporter une séance supplémentaire gratuite sans porteur.
+    const ls = [
+      line(1, SHOW, counts({ disability: 1 }), ["s1"]),
+      line(2, SHOW, counts({ pmr_companion: 1 }), ["s1"]),
+      line(3, EXTRA_SHOW, counts({ pmr_companion: 1 }), ["s2"]),
+    ];
+    expect(pmrLineError(ls[2], ls, VISIT)).toMatch(/partager/);
+    expect(pmrLineError(ls[1], ls, VISIT)).toBeNull();
+  });
+
+  it("la co-présence via l'add-on ne couvre pas les autres accès", () => {
+    // La séance partagée vient de l'add-on, mais la ligne de base de
+    // l'accompagnateur vise s2 — aucun porteur sur s2.
+    const ls = [
+      line(1, SHOW, counts({ disability: 1 }), ["s1"]),
+      line(2, SHOW, counts({ pmr_companion: 1 }), ["s2"]),
+      line(3, EXTRA_SHOW, counts({ pmr_companion: 1 }), ["s1"]),
+    ];
+    expect(pmrLineError(ls[1], ls, VISIT)).toMatch(/partager/);
   });
 
   it("un add-on disability ne crée pas de porteur", () => {
@@ -382,5 +409,97 @@ describe("règle PMR (miroir du moteur métier)", () => {
       line(3, SHOW, counts({ pmr_companion: 2 }), ["s1"]),
     ];
     expect(pmrLineError(ls[2], ls, VISIT)).toMatch(/invalidité/);
+  });
+});
+
+describe("add-ons — couverture et rattachement (miroir du moteur métier)", () => {
+  const VISIT = "2026-11-01";
+
+  it("add-on couvert par une personne de base du même droit : accepté", () => {
+    const ls = [
+      line(1, SHOW, counts({ adult: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ adult: 1 }), ["s2"]),
+    ];
+    expect(addonCoverageError(ls[1], ls)).toBeNull();
+    expect(addonAccessError(ls[1], ls, VISIT)).toBeNull();
+  });
+
+  it("add-on sans base du même droit : rejeté", () => {
+    const ls = [
+      line(1, MUSEUM, counts({ adult: 1 })),
+      line(2, EXTRA_SHOW, counts({ adult: 1 }), ["s2"]),
+    ];
+    expect(addonCoverageError(ls[1], ls)).not.toBeNull();
+  });
+
+  it("add-on gratuit non couvert par une base payante : rejeté", () => {
+    // Catégorie ET profil comptent : un adulte payant ne couvre pas un
+    // supplément d'un accompagnateur PMR gratuit.
+    const ls = [
+      line(1, SHOW, counts({ adult: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ pmr_companion: 1 }), ["s2"]),
+    ];
+    expect(addonCoverageError(ls[1], ls)).not.toBeNull();
+  });
+
+  it("add-on sur la même séance que la base : refusé (doublon)", () => {
+    const ls = [
+      line(1, SHOW, counts({ adult: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ adult: 1 }), ["s1"]),
+    ];
+    expect(addonCoverageError(ls[1], ls)).toBeNull(); // droit couvert…
+    expect(addonAccessError(ls[1], ls, VISIT)).not.toBeNull(); // …mais déjà détenu
+  });
+
+  it("add-on sur une séance déjà incluse dans le pass : refusé", () => {
+    const ls = [
+      line(1, PASS, counts({ adult: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ adult: 1 }), ["s1"]),
+    ];
+    expect(addonAccessError(ls[1], ls, VISIT)).not.toBeNull();
+  });
+
+  it("deux personnes sur s1 + add-on s1 : refusé pour toutes les personnes", () => {
+    const ls = [
+      line(1, SHOW, counts({ adult: 2 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ adult: 1 }), ["s1"]),
+    ];
+    expect(addonAccessError(ls[1], ls, VISIT)).not.toBeNull();
+  });
+
+  it("même séance pour une AUTRE personne du groupe : accepté", () => {
+    // A (pass : musée + s1) et B (musée seul) — le supplément s1
+    // complète les droits de B : 2 personnes distinctes sur s1.
+    const ls = [
+      line(1, PASS, counts({ adult: 1 }), ["s1"]),
+      line(2, MUSEUM, counts({ adult: 1 })),
+      line(3, EXTRA_SHOW, counts({ adult: 1 }), ["s1"]),
+    ];
+    expect(addonAccessError(ls[2], ls, VISIT)).toBeNull();
+  });
+
+  it("add-on PMR sur la même séance (B1) : refusé", () => {
+    const ls = [
+      line(1, SHOW, counts({ disability: 1, pmr_companion: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ pmr_companion: 1 }), ["s1"]),
+    ];
+    expect(addonCoverageError(ls[1], ls)).toBeNull();
+    expect(addonAccessError(ls[1], ls, VISIT)).not.toBeNull();
+  });
+
+  it("coveredSessionIds grise les séances déjà couvertes", () => {
+    const base = [
+      line(1, SHOW, counts({ adult: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ adult: 1 }), ["s2"]),
+    ];
+    expect([...coveredSessionIds(base[1], base, VISIT)]).toEqual(["s1"]);
+    // Pass musée + s1 : seule s1 est couverte, s2 reste choisissable.
+    const passCart = [
+      line(1, PASS, counts({ adult: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ adult: 1 }), [""]),
+    ];
+    expect([...coveredSessionIds(passCart[1], passCart, VISIT)]).toEqual([
+      "s1",
+    ]);
   });
 });

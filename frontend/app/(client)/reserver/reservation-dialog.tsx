@@ -228,9 +228,10 @@ export function ReservationDialog({
         return;
       }
       // Même règle que le moteur métier : un accompagnateur PMR par
-      // personne en invalidité (la co-présence est garantie par
-      // construction — tous les billets du dialog partagent les mêmes
-      // séances et la même visite).
+      // personne en invalidité. La co-présence (chaque accès de
+      // l'accompagnateur partagé avec un porteur) est garantie par
+      // construction — tous les billets du dialog, add-on inclus,
+      // partagent les mêmes séances et la même visite.
       if (counts.pmr_companion > counts.disability) {
         toast.error("Un accompagnateur PMR par personne en invalidité.");
         return;

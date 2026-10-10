@@ -25,7 +25,7 @@ lourde en agrégat → 400 en service, comme « capacité insuffisante ».
 """
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -285,6 +285,9 @@ async def test_addon_groupe_compte_une_seule_fois(db, catalog, today):
     # comptage ne pourrait jamais dépasser le plafond. Un add-on
     # groupe — combinaison que le modèle permet — porte 60 personnes
     # déjà couvertes par le groupe de base : 70 comptées, pas 130.
+    # L'add-on vise une AUTRE journée : au même jour, il ne ferait que
+    # dupliquer le droit musée et serait refusé (invariant « un add-on
+    # étend une personne existante »).
     await add_product(
         db,
         code="group_museum_extra",
@@ -298,7 +301,11 @@ async def test_addon_groupe_compte_une_seule_fois(db, catalog, today):
         db,
         order(
             item("group_visit", group_size=70, visit_date=today),
-            item("group_museum_extra", group_size=60, visit_date=today),
+            item(
+                "group_museum_extra",
+                group_size=60,
+                visit_date=today + timedelta(days=1),
+            ),
         ),
     )
     assert len(resa.items) == 2

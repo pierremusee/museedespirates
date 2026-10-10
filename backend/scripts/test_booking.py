@@ -17,6 +17,8 @@ puis via l'API :
   7. Lecture : GET /products, /seasonal/check, /reservations/{id} —
      smoke HTTP : statut, données attendues, sérialisation complète du
      response_model (aucun lazy-loading/MissingGreenlet).
+  8. Add-ons : couverture obligatoire + doublon d'accès rejeté (test 9c
+     — régressions PMR B1/A1 et doublon payant).
 
 Lancer depuis backend/ :  ./venv/Scripts/python.exe scripts/test_booking.py
 """
@@ -653,6 +655,51 @@ async def main() -> None:
     })
     assert s13 == 400, "extra_show seul doit être rejeté (add-on)"
     print("=> OK : add-on sans billet/pass à séance refusé (grille cohérente)")
+
+    print("\nTest 9c — add-on visant un accès déjà accordé "
+          "(régressions B1/A1/doublon) :")
+    # B1 — le supplément PMR sur la même séance créait un second
+    # billet accompagnateur : 3 billets gratuits, 3 places décomptées
+    # pour 2 personnes.
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine.crochet@jollyroger.fr",
+        "items": [
+            {"product_code": "theater_show", "category": "adult",
+             "session_id": ids["today"], "free_profile": "disability"},
+            {"product_code": "theater_show",
+             "session_id": ids["today"], "free_profile": "pmr_companion"},
+            {"product_code": "extra_show",
+             "session_id": ids["today"], "free_profile": "pmr_companion"},
+        ],
+    })
+    assert s == 400, "B1 — add-on PMR sur la même séance doit être rejeté"
+    # A1 — co-présence partielle : le supplément de l'accompagnateur
+    # visait une séance à laquelle aucun porteur n'assiste.
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine.crochet@jollyroger.fr",
+        "items": [
+            {"product_code": "theater_show", "category": "adult",
+             "session_id": ids["today"], "free_profile": "disability"},
+            {"product_code": "theater_show",
+             "session_id": ids["today"], "free_profile": "pmr_companion"},
+            {"product_code": "extra_show",
+             "session_id": ids["today2"], "free_profile": "pmr_companion"},
+        ],
+    })
+    assert s == 400, "A1 — séance d'accompagnateur sans porteur rejetée"
+    # Doublon payant — billet de base + supplément sur la même séance
+    # émettait un second billet adulte et décomptait 2 places.
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "moussaillon@jollyroger.fr",
+        "items": [
+            {"product_code": "theater_show", "category": "adult",
+             "session_id": ids["today"]},
+            {"product_code": "extra_show", "category": "adult",
+             "session_id": ids["today"]},
+        ],
+    })
+    assert s == 400, "doublon payant — base + add-on même séance rejeté"
+    print("=> OK : doublons d'accès rejetés (B1, A1, doublon payant)")
 
     print("\nTest 8 — purge des paniers abandonnés (pending > 15 min) :")
     resa10 = expect(post(f"{BASE_URL}/reservations", {
