@@ -154,6 +154,243 @@ export function regularLines(lines: CartLine[]): CartLine[] {
   return lines.filter((l) => !l.product.is_addon);
 }
 
+// ---------------------------------------------------------------------------
+// Personnes d'une ligne — identité (catégorie de billet, profil de
+// gratuité), mêmes conventions que `_persons` côté serveur : under_4
+// émet un billet enfant, pmr_companion un billet adulte et disability
+// un billet adulte (le POS envoie category=adult).
+// ---------------------------------------------------------------------------
+
+type PersonKey = { category: string; profile: Tariff | null };
+
+function personKeysOf(line: CartLine): PersonKey[] {
+  if (line.product.kind === "family") {
+    return [
+      ...Array<PersonKey>(2).fill({ category: "adult", profile: null }),
+      ...Array<PersonKey>(2 + line.extraChildren).fill({
+        category: "child",
+        profile: null,
+      }),
+    ];
+  }
+  if (line.product.kind === "group") {
+    return Array<PersonKey>(line.groupSize).fill({
+      category: "group",
+      profile: null,
+    });
+  }
+  const out: PersonKey[] = [];
+  const c = line.counts;
+  for (const t of PAID_TARIFFS) {
+    for (let i = 0; i < c[t]; i++) out.push({ category: t, profile: null });
+  }
+  for (let i = 0; i < c.under_4; i++) {
+    out.push({ category: "child", profile: "under_4" });
+  }
+  for (let i = 0; i < c.disability; i++) {
+    out.push({ category: "adult", profile: "disability" });
+  }
+  for (let i = 0; i < c.pmr_companion; i++) {
+    out.push({ category: "adult", profile: "pmr_companion" });
+  }
+  return out;
+}
+
+const personKey = (p: PersonKey) => `${p.category}|${p.profile ?? ""}`;
+
+// ---------------------------------------------------------------------------
+// Règles panier (miroir du moteur métier — le serveur reste l'autorité)
+// ---------------------------------------------------------------------------
+
+// Présence d'une ligne : chaque séance choisie, plus la visite musée
+// (jour commun `visitDate` — le POS n'expose pas l'événement ; le
+// catalogue n'a qu'un espace musée). Même convention que le backend :
+// même session_id, ou même accès musée le même jour.
+export function presenceKeys(
+  line: CartLine,
+  visitDate: string
+): Set<string> {
+  const keys = new Set(line.sessionIds.filter(Boolean));
+  if (hasMuseumDay(line.product)) keys.add(`museum:${visitDate}`);
+  return keys;
+}
+
+// Erreur PMR d'une ligne, ou null. Règles (agrégées sur le panier, sans
+// appariement nominatif) :
+//  - total accompagnateurs ≤ total porteurs d'invalidité, comptés en
+//    personnes — les lignes add-on portent des accès supplémentaires de
+//    personnes déjà couvertes, pas des personnes nouvelles ;
+//  - CHAQUE accès d'une ligne à accompagnateurs (add-ons inclus) doit
+//    aussi figurer chez un porteur (add-ons des porteurs inclus) — un
+//    simple point commun ne suffit plus : une séance supplémentaire
+//    sans porteur correspondant est refusée.
+export function pmrLineError(
+  line: CartLine,
+  lines: CartLine[],
+  visitDate: string
+): string | null {
+  if (countsOf(line).pmr_companion === 0) {
+    return null;
+  }
+  if (!line.product.is_addon) {
+    const regular = regularLines(lines);
+    const companions = regular.reduce(
+      (s, l) => s + countsOf(l).pmr_companion,
+      0
+    );
+    const bearers = regular.reduce(
+      (s, l) => s + countsOf(l).disability,
+      0
+    );
+    if (companions > bearers) {
+      return "1 accompagnateur PMR par personne en invalidité";
+    }
+  }
+  const bearerPresence = new Set(
+    lines
+      .filter((l) => countsOf(l).disability > 0)
+      .flatMap((l) => [...presenceKeys(l, visitDate)])
+  );
+  if (
+    [...presenceKeys(line, visitDate)].some(
+      (k) => !bearerPresence.has(k)
+    )
+  ) {
+    return "chaque accompagnateur doit partager chacune de ses séances ou visites avec un porteur";
+  }
+  return null;
+}
+
+// Couverture d'un add-on (règle serveur `is_addon`) : chaque personne
+// de la ligne exige, au panier, une personne de produit de base
+// accordant le même droit, de même catégorie tarifaire et même profil
+// de gratuité. Agrégé, sans appariement nominatif.
+export function addonCoverageError(
+  line: CartLine,
+  lines: CartLine[]
+): string | null {
+  if (!line.product.is_addon) return null;
+  const granted = new Set(
+    line.product.components.map((c) => c.component_type)
+  );
+  const cover = new Map<string, number>();
+  for (const l of regularLines(lines)) {
+    const types = new Set(l.product.components.map((c) => c.component_type));
+    for (const p of personKeysOf(l)) {
+      for (const t of types) {
+        const k = `${t}|${personKey(p)}`;
+        cover.set(k, (cover.get(k) ?? 0) + 1);
+      }
+    }
+  }
+  const need = new Map<string, number>();
+  for (const p of personKeysOf(line)) {
+    for (const t of granted) {
+      const k = `${t}|${personKey(p)}`;
+      need.set(k, (need.get(k) ?? 0) + 1);
+    }
+  }
+  for (const [k, n] of need) {
+    if (n > (cover.get(k) ?? 0)) {
+      return "exige, pour chaque personne, un billet/pass de même catégorie et profil accordant le même droit";
+    }
+  }
+  return null;
+}
+
+// Fusion gloutonne des « personnes » en billets par groupe
+// (catégorie, profil) — miroir de `_emit_tickets` : produits de base
+// d'abord, add-ons ensuite, ordre du panier conservé dans chaque
+// classe. Retourne les groupes de billets et l'ensemble des lignes
+// add-on dont une personne n'a pu être rattachée.
+function ticketPartition(
+  lines: CartLine[],
+  visitDate: string
+): { groups: Map<string, Set<string>[]>; orphans: Set<number> } {
+  const groups = new Map<string, Set<string>[]>();
+  const orphans = new Set<number>();
+  const ordered = [
+    ...regularLines(lines),
+    ...lines.filter((l) => l.product.is_addon),
+  ];
+  for (const l of ordered) {
+    const keys = presenceKeys(l, visitDate);
+    for (const p of personKeysOf(l)) {
+      const k = personKey(p);
+      let tickets = groups.get(k);
+      if (!tickets) {
+        tickets = [];
+        groups.set(k, tickets);
+      }
+      const ticket = tickets.find((t) => ![...keys].some((x) => t.has(x)));
+      if (!ticket) {
+        if (l.product.is_addon) {
+          orphans.add(l.id);
+          continue;
+        }
+        tickets.push(new Set(keys));
+        continue;
+      }
+      for (const x of keys) ticket.add(x);
+    }
+  }
+  return { groups, orphans };
+}
+
+// Un add-on étend les droits d'une personne existante : si chaque
+// personne de son groupe détient déjà un accès visé, la ligne
+// créerait un billet-personne surnuméraire — rejetée par le serveur
+// (second billet valide pour la même séance, jauge décomptée en
+// double). Le signaler avant l'envoi évite un aller-retour.
+export function addonAccessError(
+  line: CartLine,
+  lines: CartLine[],
+  visitDate: string
+): string | null {
+  if (!line.product.is_addon) return null;
+  const { orphans } = ticketPartition(lines, visitDate);
+  return orphans.has(line.id)
+    ? "accès déjà couvert pour chaque personne concernée — un add-on étend les droits d'une personne existante"
+    : null;
+}
+
+// Séances déjà accordées à toutes les personnes que la ligne add-on
+// pourrait compléter : les choisir serait refusé par le serveur
+// (accès dupliqué). Sert à griser les options du sélecteur — la règle
+// de rejet reste `addonAccessError` côté client et le serveur en
+// dernier ressort.
+export function coveredSessionIds(
+  line: CartLine,
+  lines: CartLine[],
+  visitDate: string
+): Set<string> {
+  const covered = new Set<string>();
+  if (!line.product.is_addon) return covered;
+  const { groups } = ticketPartition(
+    lines.filter((l) => l.id !== line.id),
+    visitDate
+  );
+  let candidates: Set<string> | null = null;
+  for (const p of personKeysOf(line)) {
+    const tickets: Set<string>[] = groups.get(personKey(p)) ?? [];
+    const first: string[] = tickets[0] ? [...tickets[0]] : [];
+    const everywhere: Set<string> = new Set(
+      first.filter(
+        (k) => !k.startsWith("museum:") && tickets.every((t) => t.has(k))
+      )
+    );
+    if (candidates === null) {
+      candidates = everywhere;
+    } else {
+      for (const k of candidates) {
+        if (!everywhere.has(k)) candidates.delete(k);
+      }
+    }
+  }
+  for (const k of candidates ?? []) covered.add(k);
+  return covered;
+}
+
 export const isMuseumOnly = (l: CartLine) =>
   l.product.kind === "simple" &&
   hasMuseumDay(l.product) &&

@@ -242,6 +242,235 @@ async def test_pmr_companion_avec_porteur_accepte(db, catalog, today):
     assert len(resa.tickets) == 2
 
 
+async def test_pmr_deux_porteurs_deux_accompagnateurs(db, catalog, today):
+    # Ratio 1:1 respecté en agrégé : 2 porteurs, 2 accompagnateurs.
+    resa = await create_reservation(
+        db,
+        order(
+            *[
+                item(
+                    "museum_entry",
+                    category="adult",
+                    visit_date=today,
+                    free_profile=FreeProfile.DISABILITY,
+                )
+                for _ in range(2)
+            ],
+            *[
+                item(
+                    "museum_entry",
+                    visit_date=today,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                )
+                for _ in range(2)
+            ],
+        ),
+    )
+    assert resa.status == "confirmed"
+    assert len(resa.tickets) == 4
+
+
+async def test_pmr_deux_accompagnateurs_un_porteur_rejetes(
+    db, catalog, today
+):
+    # Plafond : 2 accompagnateurs pour 1 seul porteur → refus, même
+    # quand la co-présence est parfaite.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "museum_entry",
+                    category="adult",
+                    visit_date=today,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                *[
+                    item(
+                        "museum_entry",
+                        visit_date=today,
+                        free_profile=FreeProfile.PMR_COMPANION,
+                    )
+                    for _ in range(2)
+                ],
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "accompagnateur" in e.value.detail
+
+
+async def test_pmr_meme_seance_accepte(db, catalog):
+    # Porteur et accompagnateur sur la même séance : co-présence
+    # vérifiée par le session_id, pas par le produit.
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show",
+                category="adult",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "theater_show",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.PMR_COMPANION,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"
+
+
+async def test_pmr_copresence_partielle(db, catalog):
+    # Un seul point commun suffit : le porteur a un pass musée+séance,
+    # l'accompagnateur ne prend que la séance — même session_id partagé.
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "pass_1_show",
+                category="adult",
+                visit_date=day_of(catalog.session),
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "theater_show",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.PMR_COMPANION,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"
+
+
+async def test_pmr_seances_differentes_rejete(db, catalog):
+    # Ratio respecté mais aucune séance ni visite commune : l'accompagnateur
+    # n'accompagne personne → refus.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show",
+                    category="adult",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                item(
+                    "theater_show",
+                    session_id=catalog.session2.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "partager" in e.value.detail
+
+
+async def test_pmr_visites_jours_differents_rejete(db, catalog, today):
+    # Pour un accès musée (sans séance), la « séance » est le jour de
+    # visite : deux dates différentes ne sont pas une co-présence.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "museum_entry",
+                    category="adult",
+                    visit_date=today,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                item(
+                    "museum_entry",
+                    visit_date=today + timedelta(days=1),
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "partager" in e.value.detail
+
+
+async def test_addon_disability_ne_cree_pas_de_porteur(db, catalog):
+    # Régression (faux négatif corrigé) : l'add-on du porteur est un
+    # accès, pas une personne — il ne peut pas couvrir un second
+    # accompagnateur.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show",
+                    category="adult",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                item(
+                    "extra_show",
+                    category="adult",
+                    session_id=catalog.session2.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                *[
+                    item(
+                        "theater_show",
+                        session_id=catalog.session.id,
+                        free_profile=FreeProfile.PMR_COMPANION,
+                    )
+                    for _ in range(2)
+                ],
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "accompagnateur" in e.value.detail
+
+
+async def test_pmr_rejet_sans_effet_de_bord(db, catalog):
+    # Un refus ne crée ni réservation ni consommation de capacité.
+    before_seats = (
+        await db.execute(
+            select(Session.booked_seats).where(
+                Session.id == catalog.session.id
+            )
+        )
+    ).scalar_one()
+    before_resa = (
+        await db.execute(select(func.count(Reservation.id)))
+    ).scalar_one()
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show",
+                    category="adult",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                *[
+                    item(
+                        "theater_show",
+                        session_id=catalog.session.id,
+                        free_profile=FreeProfile.PMR_COMPANION,
+                    )
+                    for _ in range(2)
+                ],
+            ),
+        )
+    assert e.value.status_code == 400
+    assert (
+        await db.execute(
+            select(Session.booked_seats).where(
+                Session.id == catalog.session.id
+            )
+        )
+    ).scalar_one() == before_seats
+    assert (
+        await db.execute(select(func.count(Reservation.id)))
+    ).scalar_one() == before_resa
+
+
 async def test_addon_seul_rejete(db, catalog):
     with pytest.raises(HTTPException) as e:
         await create_reservation(
@@ -740,11 +969,11 @@ async def test_addon_disability_meme_categorie_couvert(db, catalog):
     assert resa.status == "confirmed"  # panier à 0 €
 
 
-async def test_addon_pmr_compte_comme_second_accompagnateur(db, catalog):
-    # Comportement préexistant (non modifié par cette correction) : la
-    # règle « 1 accompagnateur PMR par porteur » compte les ITEMS —
-    # le supplément PMR est vu comme un second accompagnateur et reste
-    # rejeté par cette règle indépendamment de la couverture.
+async def test_pmr_addon_seance_supp_sans_porteur_rejete(db, catalog):
+    # Régression A1 : la co-présence « au moins un point commun »
+    # laissait l'accompagnateur emporter un accès gratuit à une séance
+    # sans aucun porteur. Désormais CHAQUE accès de l'accompagnateur
+    # exige un porteur disposant du même accès — ici S2 manque.
     with pytest.raises(HTTPException) as e:
         await create_reservation(
             db,
@@ -767,7 +996,72 @@ async def test_addon_pmr_compte_comme_second_accompagnateur(db, catalog):
             ),
         )
     assert e.value.status_code == 400
-    assert "accompagnateur" in e.value.detail
+    assert "partager" in e.value.detail
+
+
+async def test_pmr_addon_seance_supp_avec_porteur_accepte(db, catalog):
+    # Contre-cas : le porteur dispose aussi de S2 (via un Pass 2
+    # spectacles) — la co-présence de l'accompagnateur sur S2 est
+    # établie par son propre add-on, tous ses accès sont couverts.
+    day = day_of(catalog.session)
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "pass_2_shows", category="adult",
+                visit_date=day,
+                session_ids=[catalog.session.id, catalog.session2.id],
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "theater_show",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.PMR_COMPANION,
+            ),
+            item(
+                "extra_show",
+                session_id=catalog.session2.id,
+                free_profile=FreeProfile.PMR_COMPANION,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"  # panier à 0 €
+    assert len(resa.tickets) == 2
+    assert sorted(len(t.accesses) for t in resa.tickets) == [2, 3]
+
+
+async def test_addons_miroir_porteur_et_accompagnateur(db, catalog):
+    # Flux nominal des interfaces : le porteur et l'accompagnateur ont
+    # chacun leur séance supplémentaire — ratio respecté sur les lignes
+    # de base, accès fusionnés par personne.
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "theater_show", category="adult",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "theater_show",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.PMR_COMPANION,
+            ),
+            item(
+                "extra_show", category="adult",
+                session_id=catalog.session2.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "extra_show",
+                session_id=catalog.session2.id,
+                free_profile=FreeProfile.PMR_COMPANION,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"
+    assert len(resa.tickets) == 2
+    assert sorted(len(t.accesses) for t in resa.tickets) == [2, 2]
 
 
 async def test_addon_famille_couvert_par_forfait(db, catalog):
@@ -888,7 +1182,9 @@ async def test_addon_groupe_non_couvert_par_individuels(db, catalog, today):
 
 async def test_plusieurs_addons_differents_couverts(db, catalog):
     # Deux add-ons de droits différents pour la même personne : chacun
-    # est couvert par le droit correspondant du pass.
+    # est couvert par le droit correspondant du pass. La journée musée
+    # supplémentaire vise un AUTRE jour que le pass — au même jour, ce
+    # serait un doublon du droit déjà accordé (refusé).
     await add_product(
         db,
         code="museum_extra",
@@ -912,7 +1208,10 @@ async def test_plusieurs_addons_differents_couverts(db, catalog):
                 "extra_show", category="adult",
                 session_id=catalog.session2.id,
             ),
-            item("museum_extra", category="adult", visit_date=day),
+            item(
+                "museum_extra", category="adult",
+                visit_date=day + timedelta(days=1),
+            ),
         ),
     )
     assert resa.total_price == Decimal("28.00")  # 20 + 5 + 3
@@ -939,3 +1238,287 @@ async def test_deux_addons_meme_droit_non_empilables(db, catalog):
             ),
         )
     assert e.value.status_code == 400
+
+
+# --- Invariant « un add-on étend une personne existante » (B1/A1) ---
+#
+# La couverture par droit (ci-dessus) ne suffit pas : l'émission
+# fusionne les accès par groupe (catégorie, profil de gratuité) et une
+# ligne add-on visant un accès déjà accordé y créait un billet-
+# personne surnuméraire — second QR valide pour la même séance, jauge
+# décomptée en double, second accompagnateur PMR gratuit. La fusion
+# est désormais simulée à la commande (produits de base d'abord,
+# add-ons ensuite) et toute personne add-on sans billet d'accueil est
+# refusée — jamais de deuxième billet valide pour un accès déjà détenu.
+
+
+async def test_addon_meme_seance_rejette(db, catalog):
+    # Régression reproduite par HTTP sur main : billet de base S1 +
+    # add-on S1 émettait 2 billets adultes valides pour S1 et
+    # consommait 2 places de jauge pour une seule personne.
+    before_seats = (
+        await db.execute(
+            select(Session.booked_seats).where(
+                Session.id == catalog.session.id
+            )
+        )
+    ).scalar_one()
+    before_resa = (
+        await db.execute(select(func.count(Reservation.id)))
+    ).scalar_one()
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="adult",
+                    session_id=catalog.session.id,
+                ),
+                item(
+                    "extra_show", category="adult",
+                    session_id=catalog.session.id,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "complémentaire" in e.value.detail
+    # Rejet net : ni réservation, ni billet, ni place consommée.
+    assert (
+        await db.execute(
+            select(Session.booked_seats).where(
+                Session.id == catalog.session.id
+            )
+        )
+    ).scalar_one() == before_seats
+    assert (
+        await db.execute(select(func.count(Reservation.id)))
+    ).scalar_one() == before_resa
+
+
+async def test_addon_meme_seance_deux_personnes_accepte(db, catalog):
+    # La même séance peut être accordée à DEUX personnes différentes —
+    # le repère n'est pas la séance dupliquée mais l'accès déjà détenu
+    # par la même personne. A (pass : musée + S1) et B (musée seul) :
+    # le supplément S1 complète le billet de B — 2 billets, 2 places
+    # décomptées sur S1.
+    # Profil gratuit → panier à 0 € → billets émis immédiatement.
+    day = day_of(catalog.session)
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "pass_1_show", category="adult",
+                visit_date=day, session_id=catalog.session.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "museum_entry", category="adult", visit_date=day,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+            item(
+                "extra_show", category="adult",
+                session_id=catalog.session.id,
+                free_profile=FreeProfile.DISABILITY,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"
+    assert len(resa.tickets) == 2
+    assert sorted(len(t.accesses) for t in resa.tickets) == [2, 2]
+    s1 = (
+        await db.execute(
+            select(Session.booked_seats).where(
+                Session.id == catalog.session.id
+            )
+        )
+    ).scalar_one()
+    assert s1 == 2  # deux personnes distinctes sur S1
+
+
+async def test_addon_seance_deja_dans_le_pass_rejete(db, catalog):
+    # Même invariant sur un produit pass : pass_1_show accorde déjà
+    # S1 — le supplément S1 ne peut pas dupliquer l'accès.
+    day = day_of(catalog.session)
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "pass_1_show", category="adult",
+                    visit_date=day, session_id=catalog.session.id,
+                ),
+                item(
+                    "extra_show", category="adult",
+                    session_id=catalog.session.id,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "complémentaire" in e.value.detail
+
+
+async def test_deux_billets_meme_seance_plus_addon_rejete(db, catalog):
+    # 2 personnes sur S1 + supplément S1 : toutes les personnes du
+    # groupe ont déjà l'accès — l'add-on créerait une 3e personne.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                *[
+                    item(
+                        "theater_show", category="adult",
+                        session_id=catalog.session.id,
+                    )
+                    for _ in range(2)
+                ],
+                item(
+                    "extra_show", category="adult",
+                    session_id=catalog.session.id,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "complémentaire" in e.value.detail
+
+
+async def test_pmr_addon_meme_seance_rejette(db, catalog):
+    # Régression B1 : porteur + accompagnateur sur S1 + add-on
+    # pmr_companion sur S1 — l'émission produisait un second billet
+    # accompagnateur : 3 billets gratuits, 3 places décomptées pour
+    # 2 personnes.
+    before_seats = (
+        await db.execute(
+            select(Session.booked_seats).where(
+                Session.id == catalog.session.id
+            )
+        )
+    ).scalar_one()
+    before_resa = (
+        await db.execute(select(func.count(Reservation.id)))
+    ).scalar_one()
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="adult",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                item(
+                    "theater_show",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+                item(
+                    "extra_show",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "complémentaire" in e.value.detail
+    assert (
+        await db.execute(
+            select(Session.booked_seats).where(
+                Session.id == catalog.session.id
+            )
+        )
+    ).scalar_one() == before_seats
+    assert (
+        await db.execute(select(func.count(Reservation.id)))
+    ).scalar_one() == before_resa
+
+
+async def test_pmr_copresence_addon_seul_ne_couvre_pas_le_reste(
+    db, catalog,
+):
+    # La co-présence apportée par un add-on ne rachète pas les accès
+    # de la ligne de base : chaque accès de l'accompagnateur exige un
+    # porteur. Ici l'add-on S1 est bien partagé, mais la séance S2 de
+    # la ligne de base ne l'est pas → refus.
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item(
+                    "theater_show", category="adult",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.DISABILITY,
+                ),
+                item(
+                    "theater_show",
+                    session_id=catalog.session2.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+                item(
+                    "extra_show",
+                    session_id=catalog.session.id,
+                    free_profile=FreeProfile.PMR_COMPANION,
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "partager" in e.value.detail
+
+
+async def test_addon_musee_meme_jour_rejete(db, catalog, today):
+    # Deux journées musée au même événement le même jour = doublon du
+    # droit — l'add-on créerait une personne supplémentaire.
+    await add_product(
+        db,
+        code="museum_extra",
+        label="Journée musée supp. (pytest)",
+        kind=ProductKind.SIMPLE,
+        is_addon=True,
+        price_adult=Decimal("3.00"),
+        components=[museum_comp(catalog.musee)],
+    )
+    with pytest.raises(HTTPException) as e:
+        await create_reservation(
+            db,
+            order(
+                item("museum_entry", category="adult", visit_date=today),
+                item(
+                    "museum_extra", category="adult", visit_date=today
+                ),
+            ),
+        )
+    assert e.value.status_code == 400
+    assert "complémentaire" in e.value.detail
+
+
+async def test_addon_musee_autre_jour_fusionne(db, catalog, today):
+    # À un autre jour, la journée musée supplémentaire est un droit
+    # distinct (la date fait partie de la clé d'accès) : elle fusionne
+    # sur le même billet — 1 QR, 2 accès musée datés différemment.
+    await add_product(
+        db,
+        code="museum_extra",
+        label="Journée musée supp. (pytest)",
+        kind=ProductKind.SIMPLE,
+        is_addon=True,
+        price_adult=Decimal("3.00"),
+        price_child=Decimal("2.00"),
+        price_reduced=Decimal("2.00"),
+        components=[museum_comp(catalog.musee)],
+    )
+    resa = await create_reservation(
+        db,
+        order(
+            item(
+                "museum_entry",
+                visit_date=today,
+                free_profile=FreeProfile.UNDER_4,
+            ),
+            item(
+                "museum_extra",
+                visit_date=today + timedelta(days=1),
+                free_profile=FreeProfile.UNDER_4,
+            ),
+        ),
+    )
+    assert resa.status == "confirmed"  # panier à 0 €
+    assert len(resa.tickets) == 1
+    assert len(resa.tickets[0].accesses) == 2

@@ -158,6 +158,29 @@ def _session_slots(
     return slots
 
 
+def _access_keys(plan: dict) -> set[tuple]:
+    """Clés d'accès d'une ligne de commande — mêmes clés que la fusion
+    d'émission des billets (`_emit_tickets`).
+
+    Une « séance » est un `session_id` — deux produits différents visant
+    le même créneau partagent la même clé. Un accès musée (flux continu,
+    sans séance) est le triplet (événement, jour de visite) : deux
+    journées musée sur le même événement à des dates différentes sont
+    deux droits distincts. Ces clés servent à la co-présence PMR comme
+    à la simulation de la fusion pour les add-ons.
+    """
+    keys = {("session", s) for s in plan["session_ids"]}
+    visit_date = plan["item_in"].visit_date
+    if visit_date is not None:
+        keys |= {
+            ("museum", c.event_id, visit_date)
+            for c in plan["product"].components
+            if c.component_type == ComponentType.MUSEUM_DAY
+            and c.event_id is not None
+        }
+    return keys
+
+
 async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
     """Émet les billets à la confirmation (DFC n°7) — 1 billet par personne.
 
@@ -167,10 +190,16 @@ async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
     sur le même billet quand elles partagent (catégorie, profil de
     gratuité) — fusion gloutonne : une personne se rattache au premier
     billet du groupe qui n'a pas encore un accès identique (même type /
-    événement / séance). Limite assumée : deux achats distincts de même
-    catégorie peuvent être fusionnés alors qu'ils visaient deux
-    personnes différentes (les produits « pass » restent la voie
-    recommandée pour grouper les droits).
+    événement / séance / jour — la date distingue deux journées musée
+    sur le même événement). Les produits de base fondent les personnes,
+    les lignes `is_addon` ne font qu'étendre leurs droits : elles sont
+    traitées en dernier et doivent se rattacher à un billet existant —
+    jamais en créer un (invariant vérifié à la commande ; une personne
+    add-on surnuméraire émettrait un second billet valide pour un accès
+    déjà accordé, jauge comprise). Limite assumée : deux achats
+    distincts de même catégorie peuvent être fusionnés alors qu'ils
+    visaient deux personnes différentes (les produits « pass » restent
+    la voie recommandée pour grouper les droits).
     """
     if reservation.tickets:
         return
@@ -189,11 +218,15 @@ async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
         sessions = {s.id: s for s in result.scalars()}
 
     # Billets émis, regroupés par (catégorie, profil de gratuité) pour
-    # la fusion inter-lignes — ordre d'insertion conservé.
+    # la fusion inter-lignes — ordre d'insertion conservé. Produits de
+    # base d'abord (ordre du panier), add-ons ensuite : un add-on ne
+    # fonde jamais de billet-personne, il étend un billet existant.
     groups: dict[
         tuple[TicketCategory, FreeProfile | None], list[Ticket]
     ] = {}
-    for item in reservation.items:
+    for item in sorted(
+        reservation.items, key=lambda i: i.product.is_addon
+    ):
         product = item.product
         slots = _session_slots(
             product,
@@ -237,14 +270,20 @@ async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
                 (person_category, item.free_profile), []
             )
             keys = {
-                (a.access_type, a.event_id, a.session_id) for a in accesses
+                (a.access_type, a.event_id, a.session_id, a.valid_date)
+                for a in accesses
             }
             ticket = next(
                 (
                     t
                     for t in tickets
                     if not {
-                        (a.access_type, a.event_id, a.session_id)
+                        (
+                            a.access_type,
+                            a.event_id,
+                            a.session_id,
+                            a.valid_date,
+                        )
                         for a in t.accesses
                     }
                     & keys
@@ -252,6 +291,17 @@ async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
                 None,
             )
             if ticket is None:
+                if product.is_addon:
+                    # Défensif : l'invariant « un add-on étend une
+                    # personne existante » est vérifié à la commande —
+                    # il ne peut échouer ici que si le catalogue a été
+                    # modifié entre-temps.
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Produit « {product.code} » modifié "
+                        "depuis la commande : aucune personne couverte "
+                        "ne peut recevoir cet accès — billets non émis",
+                    )
                 ticket = Ticket(ticket_category=person_category)
                 item.tickets.append(ticket)
                 reservation.tickets.append(ticket)
@@ -411,17 +461,78 @@ async def create_reservation(
             "le même droit dans la même commande",
         )
 
-    # Accompagnateur PMR : max 1 par porteur de carte d'invalidité (DFC n°6).
-    profiles = [
-        plan["item_in"].free_profile for plan in plans
+    # Invariant « un add-on étend une personne existante » : la fusion
+    # gloutonne de `_emit_tickets` est simulée — produits de base
+    # d'abord, add-ons ensuite, ordre du panier conservé dans chaque
+    # classe, mêmes clés d'accès qu'à l'émission. Chaque personne d'une
+    # ligne add-on doit rattacher ses accès à un billet existant de son
+    # groupe (catégorie, profil) sans dupliquer une clé déjà posée ;
+    # sinon l'émission créerait un billet-personne surnuméraire — le
+    # cas typique : un second droit valide pour une séance déjà
+    # accordée (jauge décomptée en double + second QR pour la même
+    # personne). Le contrôle est agrégé, sans appariement nominatif :
+    # les personnes d'un même groupe sont interchangeables.
+    ticket_groups: dict[tuple, list[set]] = {}
+    for plan in sorted(plans, key=lambda p: p["product"].is_addon):
+        keys = _access_keys(plan)
+        for person_category in plan["persons"]:
+            tickets = ticket_groups.setdefault(
+                (person_category, plan["item_in"].free_profile), []
+            )
+            ticket = next((t for t in tickets if not (t & keys)), None)
+            if ticket is None:
+                if plan["product"].is_addon:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Un produit complémentaire étend les "
+                        "droits d'une personne existante : cet accès "
+                        "est déjà couvert pour chaque personne "
+                        f"concernée (« {plan['product'].code} »)",
+                    )
+                ticket = set()
+                tickets.append(ticket)
+            ticket |= keys
+
+    # Accompagnateurs PMR (DFC n°6) : max 1 par porteur de carte
+    # d'invalidité. Le décompte se fait en PERSONNES — seules les lignes
+    # de produits de base en portent : une ligne add-on porte des accès
+    # supplémentaires d'une personne déjà couverte par un produit de
+    # base (règle de couverture ci-dessus), pas une personne nouvelle.
+    base_profiles = [
+        plan["item_in"].free_profile
+        for plan in plans
+        if not plan["product"].is_addon
     ]
-    if profiles.count(FreeProfile.PMR_COMPANION) > profiles.count(
+    if base_profiles.count(FreeProfile.PMR_COMPANION) > base_profiles.count(
         FreeProfile.DISABILITY
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Un accompagnateur PMR exige un porteur de carte "
             "d'invalidité dans la même commande",
+        )
+
+    # Co-présence : CHAQUE accès accordé à un accompagnateur — y
+    # compris ceux apportés par ses lignes add-on (séance
+    # supplémentaire…) — exige un porteur disposant du même accès.
+    # Agrégé, sans appariement nominatif : toutes les lignes
+    # « disability » (de base ou add-on) fondent la présence réelle
+    # des porteurs. L'ancien contrôle n'exigeait qu'un point commun
+    # sur la ligne de base : il laissait un accompagnateur emporter
+    # des accès gratuits à des séances sans aucun porteur (A1).
+    bearer_accesses: set[tuple] = set()
+    companion_accesses: set[tuple] = set()
+    for plan in plans:
+        keys = _access_keys(plan)
+        if plan["item_in"].free_profile == FreeProfile.DISABILITY:
+            bearer_accesses |= keys
+        elif plan["item_in"].free_profile == FreeProfile.PMR_COMPANION:
+            companion_accesses |= keys
+    if companion_accesses - bearer_accesses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Un accompagnateur PMR doit partager chacune de ses "
+            "séances ou visites avec un porteur de carte d'invalidité",
         )
 
     # --- Verrouillage anti-surbooking, trié par id (anti-deadlock) ---

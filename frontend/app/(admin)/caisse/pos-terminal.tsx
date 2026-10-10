@@ -41,13 +41,17 @@ import {
   PASS_1_CODE,
   absorbIntoPass,
   addProductToCart,
+  addonAccessError,
+  addonCoverageError,
   autoSessionExcluding,
   autoSessions,
   countsOf,
+  coveredSessionIds,
   hasMuseumDay,
   lineEstimate,
   linePersons,
   passSuggestion,
+  pmrLineError,
   sessionCountOf,
   type CartLine,
   type Product,
@@ -456,9 +460,9 @@ export function PosTerminal({
         return `places insuffisantes (${cap} restantes)`;
       }
     }
-    const c = countsOf(line);
-    if (c.pmr_companion > c.disability) {
-      return "1 accompagnateur PMR par personne en invalidité";
+    const pmrErr = pmrLineError(line, lines, visitDate);
+    if (pmrErr) {
+      return pmrErr;
     }
     if (
       line.product.kind === "group" &&
@@ -470,18 +474,15 @@ export function PosTerminal({
       return "aucune personne sur la ligne";
     }
     if (line.product.is_addon) {
-      // Règle serveur is_addon : les personnes en séance supplémentaire
-      // ne peuvent excéder celles couvertes par un billet/pass à séance.
-      const basePersons = regularLines
-        .filter((l) => sessionCountOf(l.product) > 0)
-        .reduce((s, l) => s + linePersons(l), 0);
-      const extraPersons = extraLines.reduce(
-        (s, l) => s + linePersons(l),
-        0
-      );
-      if (extraPersons > basePersons) {
-        return "exige un billet/pass avec séance pour chaque personne";
-      }
+      // Règle serveur is_addon : chaque personne de l'add-on exige une
+      // personne de base de même catégorie/profil accordant le même
+      // droit…
+      const covErr = addonCoverageError(line, lines);
+      if (covErr) return covErr;
+      // …et doit pouvoir compléter un billet existant sans dupliquer
+      // un accès déjà accordé (jamais de billet-personne surnuméraire).
+      const accErr = addonAccessError(line, lines, visitDate);
+      if (accErr) return accErr;
     }
     return null;
   }
@@ -757,6 +758,12 @@ export function PosTerminal({
   function renderLine(l: CartLine) {
     const err = lineErrors(l);
     const need = sessionCountOf(l.product);
+    // Add-on : séances déjà accordées à toutes les personnes que la
+    // ligne pourrait compléter — grisées car un tel choix serait
+    // refusé par le serveur (accès dupliqué).
+    const covered = l.product.is_addon
+      ? coveredSessionIds(l, lines, visitDate)
+      : null;
     return (
       <div
         key={l.id}
@@ -892,6 +899,7 @@ export function PosTerminal({
                   disabled={
                     s.remaining === 0 ||
                     s.expired ||
+                    covered?.has(s.id) === true ||
                     (l.sessionIds.includes(s.id) &&
                       l.sessionIds[i] !== s.id)
                   }
