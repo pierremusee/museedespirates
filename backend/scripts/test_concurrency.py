@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,6 +49,7 @@ from app.models import (
 
 BASE_URL = "http://127.0.0.1:8000"
 UTC = ZoneInfo("UTC")
+MUSEUM_TZ = ZoneInfo("Europe/Paris")
 
 K = 5    # capacité de la séance
 N = 30   # requêtes concurrentes sur la jauge
@@ -271,7 +272,7 @@ async def main() -> None:
         "items": [{
             "product_code": "concurrency_museum",
             "category": "adult",
-            "visit_date": str(date.today()),
+            "visit_date": str(datetime.now(MUSEUM_TZ).date()),
         }],
     })
     assert s == 201
@@ -307,7 +308,7 @@ async def main() -> None:
         "items": [{
             "product_code": "concurrency_museum",
             "category": "adult",
-            "visit_date": str(date.today()),
+            "visit_date": str(datetime.now(MUSEUM_TZ).date()),
         }],
     })
     assert s == 201
@@ -348,7 +349,7 @@ async def main() -> None:
             "items": [{
                 "product_code": "concurrency_museum",
                 "category": "adult",
-                "visit_date": str(date.today()),
+                "visit_date": str(datetime.now(MUSEUM_TZ).date()),
             }],
         })
         assert s == 201
@@ -388,7 +389,7 @@ async def main() -> None:
         "items": [{
             "product_code": "concurrency_museum",
             "category": "adult",
-            "visit_date": str(date.today()),
+            "visit_date": str(datetime.now(MUSEUM_TZ).date()),
         }],
     })
     assert s == 201
@@ -423,7 +424,7 @@ async def main() -> None:
         "items": [{
             "product_code": "concurrency_museum",
             "category": "adult",
-            "visit_date": str(date.today()),
+            "visit_date": str(datetime.now(MUSEUM_TZ).date()),
         }],
     })
     assert s == 201  # total 5.00
@@ -461,7 +462,7 @@ async def main() -> None:
         "items": [{
             "product_code": "concurrency_museum",
             "category": "adult",
-            "visit_date": str(date.today()),
+            "visit_date": str(datetime.now(MUSEUM_TZ).date()),
         }],
     })
     assert s == 201  # total 5.00

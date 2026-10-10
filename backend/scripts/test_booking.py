@@ -154,23 +154,39 @@ async def seed() -> dict:
         # Jauge 1 dédiée au test d'annulation (tiny reste occupée par la
         # commande pending du test 5 jusqu'à la purge).
         cancel_sess = Session(event_id=kraken.id, start_time=session_at(low_day, 20, 0), max_capacity=1)
+        # Séances « du jour » (jour civil Europe/Paris) : now+1h/3h peut
+        # basculer sur le lendemain après 23h locales, et now-20min peut
+        # rester « hier » après minuit — or la vente et le scan d'une
+        # séance exigent le même jour civil. Repli : borne dans la
+        # journée en cours.
+        now_utc = datetime.now(UTC)
+        paris_today = datetime.now(MUSEUM_TZ).date()
+
+        def session_today(offset: timedelta, fallback: time) -> datetime:
+            start = now_utc + offset
+            if start.astimezone(MUSEUM_TZ).date() != paris_today:
+                start = session_at(
+                    paris_today, fallback.hour, fallback.minute
+                )
+            return start
+
         # Séance "aujourd'hui" pour tester le scan de billets session_ticket.
         today_sess = Session(
             event_id=kraken.id,
-            start_time=datetime.now(UTC) + timedelta(hours=1),
+            start_time=session_today(timedelta(hours=1), time(23, 59)),
             max_capacity=10,
         )
         # Seconde séance du jour : séance supplémentaire à tarif réduit.
         today_sess2 = Session(
             event_id=kraken.id,
-            start_time=datetime.now(UTC) + timedelta(hours=3),
+            start_time=session_today(timedelta(hours=3), time(23, 58)),
             max_capacity=10,
         )
         # Fenêtre de vente = tolérance du contrôle (30 min) : une séance
         # commencée depuis 20 min (vendable) et une expirée (refusée).
         recent = Session(
             event_id=kraken.id,
-            start_time=datetime.now(UTC) - timedelta(minutes=20),
+            start_time=session_today(timedelta(minutes=-20), time(0, 0)),
             max_capacity=10,
         )
         expired = Session(
@@ -424,7 +440,11 @@ async def main() -> None:
                    "visit_date": wrong_day, "session_id": ids["s1"]}],
     }), 400, "test 3 — visit_date ≠ jour de la séance")
 
-    today = str(date.today())
+    # Jour de référence = jour civil Paris (règle métier de validité),
+    # pas la date UTC du runner — entre 0h et 2h Paris (été), les deux
+    # divergent et le billet seedé « aujourd'hui » arrivait daté de
+    # la veille → scan refusé (flake CI).
+    today = str(datetime.now(MUSEUM_TZ).date())
     print("\nTest 4a — billet Musée (open_ticket) valable aujourd'hui + profil gratuit -4 ans :")
     resa4 = expect(post(f"{BASE_URL}/reservations", {
         "customer_email": "anne.bonny@revenge.fr",
@@ -706,15 +726,16 @@ async def main() -> None:
 
     # Contrat API pour les clients : `is_expired` est calculé côté
     # serveur (Session.is_expired) — le POS grise sans dupliquer la règle.
-    # (la séance +3 h peut tomber sur le lendemain en fin de journée)
-    tomorrow = str(date.today() + timedelta(days=1))
+    # Les trois jours sont interrogés : +3 h peut tomber sur le
+    # lendemain en fin de journée, et -1 h sur la veille après minuit.
+    yesterday = str(datetime.now(MUSEUM_TZ).date() - timedelta(days=1))
+    tomorrow = str(datetime.now(MUSEUM_TZ).date() + timedelta(days=1))
     body = [
-        *json.loads(
-            urllib.request.urlopen(f"{BASE_URL}/events?date={today}").read()
-        ),
-        *json.loads(
-            urllib.request.urlopen(f"{BASE_URL}/events?date={tomorrow}").read()
-        ),
+        e
+        for day in (yesterday, today, tomorrow)
+        for e in json.loads(
+            urllib.request.urlopen(f"{BASE_URL}/events?date={day}").read()
+        )
     ]
     flags = {
         s["id"]: s["is_expired"]
@@ -839,6 +860,94 @@ async def main() -> None:
     expect(get(f"{BASE_URL}/reservations/{uuid.uuid4()}"),
            404, "test 12c — réservation inconnue")
     print("   => graphe complet sérialisé, 404 propre sur inconnu")
+
+    print("\nTest 13 — bornes d'entrée : montants et quantités "
+          "(422 propre, jamais 500) :")
+    # AUDIT-008 : un champ hors borne est rejeté en 422 par le schéma —
+    # avant, une valeur extrême débordait la colonne PostgreSQL (500)
+    # ou déclenchait une création massive de billets.
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "group_visit", "group_size": 121,
+                   "visit_date": today}],
+    })
+    assert s == 422, f"groupe de 121 personnes accepté ({s})"
+    # 11 billets individuels = 11 lignes : doit passer (les interfaces
+    # émettent 1 item par personne — la borne lignes est au plafond
+    # de 120 personnes, pas en dessous).
+    s, resa11i = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}] * 11,
+    })
+    assert s == 201 and len(resa11i["items"]) == 11, (
+        f"11 billets individuels refusés ({s})"
+    )
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}] * 121,
+    })
+    assert s == 422, f"commande de 121 lignes acceptée ({s})"
+    s, _ = post(f"{BASE_URL}/reservations", {
+        "customer_email": "a" * 310 + "@pirates-tres-long.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}],
+    })
+    # EmailStr borne l'adresse à 254 car. (RFC 5321) < colonne 320.
+    assert s == 422, f"email > 254 caractères accepté ({s})"
+
+    resa_b = expect(post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": [{"product_code": "museum_entry", "category": "adult",
+                   "visit_date": today}],
+    }), 201, "test 13 — commande de référence")
+    s, _ = pay(resa_b["id"], "cash", "50000.01")
+    assert s == 422, f"tranche > 50 000 € acceptée ({s})"
+    s, _ = pay(resa_b["id"], "cash", "99999999999")
+    assert s == 422, f"montant débordant Numeric accepté ({s})"
+
+    # Borne incluse : 120 personnes, produit groupe sans jauge.
+    s, resa_g = post(f"{BASE_URL}/reservations", {
+        "customer_email": "scolaire@ecole-pirates.fr",
+        "channel": "pos",
+        "items": [{"product_code": "group_visit", "group_size": 120,
+                   "visit_date": today}],
+    })
+    assert s == 201, f"groupe de 120 refusé ({s})"
+    assert Decimal(resa_g["total_price"]) == Decimal("1200.00")
+
+    # Deux lignes valides en champ mais 60 + 61 > 120 en agrégat → 400.
+    s, detail = post(f"{BASE_URL}/reservations", {
+        "customer_email": "scolaire@ecole-pirates.fr",
+        "channel": "pos",
+        "items": [
+            {"product_code": "group_visit", "group_size": 60,
+             "visit_date": today},
+            {"product_code": "group_visit", "group_size": 61,
+             "visit_date": today},
+        ],
+    })
+    assert s == 400 and "120" in str(detail), (
+        f"agrégat > 120 personnes accepté ({s})"
+    )
+
+    # Séances supplémentaires = accès pour des personnes déjà
+    # comptées : 12 billets théâtre + 12 add-ons → 12 personnes.
+    items_show = [{"product_code": "theater_show", "category": "adult",
+                   "session_id": ids["s1"]}] * 12
+    items_extra = [{"product_code": "extra_show", "category": "adult",
+                    "session_id": ids["s2"]}] * 12
+    s, resa_x = post(f"{BASE_URL}/reservations", {
+        "customer_email": "capitaine@bornes.fr",
+        "items": items_show + items_extra,
+    })
+    assert s == 201 and len(resa_x["items"]) == 24, (
+        f"12 personnes + 12 séances supp. refusées ({s})"
+    )
+    print("=> OK : 422 sur champs hors borne, 400 sur agrégat > 120 "
+          "personnes, bornes exactes acceptées, add-ons non "
+          "double-comptés")
 
 
 async def run() -> None:

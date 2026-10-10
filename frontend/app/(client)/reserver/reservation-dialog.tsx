@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cn } from "@/lib/utils";
+import { apiErrorDetail, cn } from "@/lib/utils";
 import {
   checkPreviousOutcome,
   clearPendingPayment,
@@ -381,7 +381,7 @@ export function ReservationDialog({
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        toast.error(body.detail ?? `Erreur ${res.status} lors de la réservation.`);
+        toast.error(apiErrorDetail(body, `Erreur ${res.status} lors de la réservation.`));
         setOpen(false);
         router.refresh();
         return;
@@ -459,7 +459,7 @@ export function ReservationDialog({
               setPendingUI(null);
               clearPendingPayment(sessionStorage);
             }
-            toast.error(body.detail ?? "Le paiement par carte a échoué.");
+            toast.error(apiErrorDetail(body, "Le paiement par carte a échoué."));
           }
           setOpen(false);
           router.refresh();
