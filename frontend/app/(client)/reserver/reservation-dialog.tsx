@@ -227,6 +227,14 @@ export function ReservationDialog({
         toast.error("Sélectionnez au moins un billet.");
         return;
       }
+      // Même règle que le moteur métier : un accompagnateur PMR par
+      // personne en invalidité (la co-présence est garantie par
+      // construction — tous les billets du dialog partagent les mêmes
+      // séances et la même visite).
+      if (counts.pmr_companion > counts.disability) {
+        toast.error("Un accompagnateur PMR par personne en invalidité.");
+        return;
+      }
       if (needsSessions && persons > capacity) {
         toast.error("Pas assez de places disponibles sur cette séance.");
         return;

@@ -154,6 +154,63 @@ export function regularLines(lines: CartLine[]): CartLine[] {
   return lines.filter((l) => !l.product.is_addon);
 }
 
+// ---------------------------------------------------------------------------
+// Règle PMR (miroir du moteur métier — le serveur reste l'autorité)
+// ---------------------------------------------------------------------------
+
+// Présence d'une ligne : chaque séance choisie, plus la visite musée
+// (jour commun `visitDate` — le POS n'expose pas l'événement ; le
+// catalogue n'a qu'un espace musée). Même convention que le backend :
+// même session_id, ou même accès musée le même jour.
+export function presenceKeys(
+  line: CartLine,
+  visitDate: string
+): Set<string> {
+  const keys = new Set(line.sessionIds.filter(Boolean));
+  if (hasMuseumDay(line.product)) keys.add(`museum:${visitDate}`);
+  return keys;
+}
+
+// Erreur PMR d'une ligne, ou null. Règles (agrégées sur le panier, sans
+// appariement nominatif) :
+//  - total accompagnateurs ≤ total porteurs d'invalidité, comptés en
+//    personnes — les lignes add-on portent des accès supplémentaires de
+//    personnes déjà couvertes, pas des personnes nouvelles ;
+//  - chaque ligne à accompagnateurs partage une séance ou la visite
+//    musée avec au moins une ligne à porteurs (tous les accès des
+//    porteurs comptent comme présence réelle, y compris leurs add-ons).
+export function pmrLineError(
+  line: CartLine,
+  lines: CartLine[],
+  visitDate: string
+): string | null {
+  if (line.product.is_addon || countsOf(line).pmr_companion === 0) {
+    return null;
+  }
+  const regular = regularLines(lines);
+  const companions = regular.reduce(
+    (s, l) => s + countsOf(l).pmr_companion,
+    0
+  );
+  const bearers = regular.reduce((s, l) => s + countsOf(l).disability, 0);
+  if (companions > bearers) {
+    return "1 accompagnateur PMR par personne en invalidité";
+  }
+  const bearerPresence = new Set(
+    lines
+      .filter((l) => countsOf(l).disability > 0)
+      .flatMap((l) => [...presenceKeys(l, visitDate)])
+  );
+  if (
+    [...presenceKeys(line, visitDate)].every(
+      (k) => !bearerPresence.has(k)
+    )
+  ) {
+    return "chaque accompagnateur doit partager une séance ou la visite avec un porteur";
+  }
+  return null;
+}
+
 export const isMuseumOnly = (l: CartLine) =>
   l.product.kind === "simple" &&
   hasMuseumDay(l.product) &&

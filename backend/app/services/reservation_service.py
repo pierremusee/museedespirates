@@ -158,6 +158,26 @@ def _session_slots(
     return slots
 
 
+def _presence_keys(plan: dict) -> set[tuple]:
+    """Points de présence d'une ligne de commande.
+
+    Une « séance » est un `session_id` — deux produits différents visant
+    le même créneau partagent la même clé. Un accès musée (flux continu,
+    sans séance) est représenté par le couple (événement, jour de
+    visite). Deux lignes sont co-présentes si leurs clés se recoupent.
+    """
+    keys = {("session", s) for s in plan["session_ids"]}
+    visit_date = plan["item_in"].visit_date
+    if visit_date is not None:
+        keys |= {
+            ("museum", c.event_id, visit_date)
+            for c in plan["product"].components
+            if c.component_type == ComponentType.MUSEUM_DAY
+            and c.event_id is not None
+        }
+    return keys
+
+
 async def _emit_tickets(db: AsyncSession, reservation: Reservation) -> None:
     """Émet les billets à la confirmation (DFC n°7) — 1 billet par personne.
 
@@ -411,11 +431,17 @@ async def create_reservation(
             "le même droit dans la même commande",
         )
 
-    # Accompagnateur PMR : max 1 par porteur de carte d'invalidité (DFC n°6).
-    profiles = [
-        plan["item_in"].free_profile for plan in plans
+    # Accompagnateurs PMR (DFC n°6) : max 1 par porteur de carte
+    # d'invalidité. Le décompte se fait en PERSONNES — seules les lignes
+    # de produits de base en portent : une ligne add-on porte des accès
+    # supplémentaires d'une personne déjà couverte par un produit de
+    # base (règle de couverture ci-dessus), pas une personne nouvelle.
+    base_profiles = [
+        plan["item_in"].free_profile
+        for plan in plans
+        if not plan["product"].is_addon
     ]
-    if profiles.count(FreeProfile.PMR_COMPANION) > profiles.count(
+    if base_profiles.count(FreeProfile.PMR_COMPANION) > base_profiles.count(
         FreeProfile.DISABILITY
     ):
         raise HTTPException(
@@ -423,6 +449,30 @@ async def create_reservation(
             detail="Un accompagnateur PMR exige un porteur de carte "
             "d'invalidité dans la même commande",
         )
+
+    # Co-présence : chaque accompagnateur (personne = ligne de base)
+    # partage au moins un point de présence avec un porteur — même
+    # séance ou même accès musée. Agrégé, sans appariement nominatif :
+    # n'importe quel porteur suffit. Tous les accès des lignes
+    # « disability » comptent comme présence réelle du porteur, y
+    # compris ceux des add-ons ; du côté accompagnateur, un add-on ne
+    # peut pas être rattaché nominativement à une ligne de base, seule
+    # la présence de la ligne de base est évaluée.
+    bearer_presence: set[tuple] = set()
+    for plan in plans:
+        if plan["item_in"].free_profile == FreeProfile.DISABILITY:
+            bearer_presence |= _presence_keys(plan)
+    for plan in plans:
+        if (
+            plan["item_in"].free_profile == FreeProfile.PMR_COMPANION
+            and not plan["product"].is_addon
+            and not (_presence_keys(plan) & bearer_presence)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Un accompagnateur PMR doit partager une séance "
+                "ou une visite avec un porteur de carte d'invalidité",
+            )
 
     # --- Verrouillage anti-surbooking, trié par id (anti-deadlock) ---
     sessions: dict[uuid.UUID, Session] = {}

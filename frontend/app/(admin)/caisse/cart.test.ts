@@ -6,6 +6,7 @@ import {
   copiableCounts,
   lineEstimate,
   passSuggestion,
+  pmrLineError,
   strictPassHint,
   zeroCounts,
   type CartLine,
@@ -305,5 +306,81 @@ describe("miroir de composition à l'ajout", () => {
     const c = copiableCounts(ls, SHOW);
     expect(c.adult).toBe(2);
     expect(c.child).toBe(1);
+  });
+});
+
+describe("règle PMR (miroir du moteur métier)", () => {
+  const VISIT = "2026-11-01";
+
+  it("accepte 1 porteur + 1 accompagnateur sur la même séance", () => {
+    const ls = [
+      line(1, SHOW, counts({ disability: 1 }), ["s1"]),
+      line(2, SHOW, counts({ pmr_companion: 1 }), ["s1"]),
+    ];
+    expect(pmrLineError(ls[1], ls, VISIT)).toBeNull();
+  });
+
+  it("accepte 2 porteurs + 2 accompagnateurs", () => {
+    const ls = [
+      line(1, SHOW, counts({ disability: 2, pmr_companion: 2 }), ["s1"]),
+    ];
+    expect(pmrLineError(ls[0], ls, VISIT)).toBeNull();
+  });
+
+  it("rejette un accompagnateur sans porteur", () => {
+    const ls = [line(1, SHOW, counts({ pmr_companion: 1 }), ["s1"])];
+    expect(pmrLineError(ls[0], ls, VISIT)).toMatch(/invalidité/);
+  });
+
+  it("rejette 2 accompagnateurs pour 1 porteur même co-présents", () => {
+    const ls = [
+      line(1, SHOW, counts({ disability: 1, pmr_companion: 2 }), ["s1"]),
+    ];
+    expect(pmrLineError(ls[0], ls, VISIT)).toMatch(/invalidité/);
+  });
+
+  it("le ratio est agrégé panier : porteur et accompagnateur sur des lignes différentes", () => {
+    // L'ancienne garde par ligne rejetait un pmr sans disability sur la
+    // même ligne — la règle métier est un ratio agrégé + co-présence.
+    const ls = [
+      line(1, PASS, counts({ disability: 1 }), ["s1"]),
+      line(2, SHOW, counts({ pmr_companion: 1 }), ["s1"]),
+    ];
+    expect(pmrLineError(ls[1], ls, VISIT)).toBeNull();
+  });
+
+  it("rejette un accompagnateur sur une séance sans porteur", () => {
+    const ls = [
+      line(1, SHOW, counts({ disability: 1 }), ["s1"]),
+      line(2, SHOW, counts({ pmr_companion: 1 }), ["s2"]),
+    ];
+    expect(pmrLineError(ls[1], ls, VISIT)).toMatch(/partager/);
+  });
+
+  it("la visite musée du même jour compte comme co-présence", () => {
+    const ls = [
+      line(1, MUSEUM, counts({ disability: 1 })),
+      line(2, MUSEUM, counts({ pmr_companion: 1 })),
+    ];
+    expect(pmrLineError(ls[1], ls, VISIT)).toBeNull();
+  });
+
+  it("un add-on accompagnateur n'est pas une personne de plus", () => {
+    const ls = [
+      line(1, SHOW, counts({ disability: 1, pmr_companion: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ disability: 1, pmr_companion: 1 }), ["s2"]),
+    ];
+    expect(pmrLineError(ls[0], ls, VISIT)).toBeNull();
+    // Une ligne add-on n'est jamais elle-même en erreur PMR.
+    expect(pmrLineError(ls[1], ls, VISIT)).toBeNull();
+  });
+
+  it("un add-on disability ne crée pas de porteur", () => {
+    const ls = [
+      line(1, SHOW, counts({ disability: 1 }), ["s1"]),
+      line(2, EXTRA_SHOW, counts({ disability: 1 }), ["s2"]),
+      line(3, SHOW, counts({ pmr_companion: 2 }), ["s1"]),
+    ];
+    expect(pmrLineError(ls[2], ls, VISIT)).toMatch(/invalidité/);
   });
 });

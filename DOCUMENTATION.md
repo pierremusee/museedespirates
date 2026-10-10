@@ -249,8 +249,15 @@ pending ──(solde = 0 via payments, ou total = 0 €)──> confirmed  → b
 | `disability` | catégorie de l'item (adult/child requis) | « vérifier la carte » |
 | `pmr_companion` | adult | « accompagnateur PMR » |
 
-Accompagnateur PMR : **max 1 par porteur `disability`** dans la même commande.
-`free_profile` interdit sur `family` et `group`.
+Accompagnateur PMR : **max 1 par porteur `disability`** dans la même
+commande, décompté en **personnes** — seules les lignes de produits de
+base comptent : une ligne add-on porte des accès supplémentaires d'une
+personne déjà couverte (elle conserve le `free_profile` sans modifier
+le ratio). Chaque accompagnateur doit en outre **partager un point de
+présence** avec au moins un porteur : même `session_id` (quel que soit
+le produit) ou même accès musée (même événement, même `visit_date`) —
+contrôle agrégé, sans appariement nominatif. `free_profile` interdit
+sur `family` et `group`.
 
 ### Canaux de vente & paiements (DFC n°7)
 
@@ -585,8 +592,8 @@ basse saison) et `high_season` ; `factories.py` les helpers de création.
 `test_pricing.py` : modificateurs tarifaires et bornes de saison.
 `test_reservation_rules.py` : matrice de validation de `create_reservation`
 (20 rejets auparavant ni testés ni exercés : `free_profile` sur famille/
-groupe, `disability` sans catégorie, PMR sans porteur, add-on sans droit
-de base, séance expirée, capacité…) — complétée par la matrice de
+groupe, `disability` sans catégorie, PMR sans porteur ni sans co-présence,
+add-on sans droit de base, séance expirée, capacité…) — complétée par la matrice de
 **couverture des add-ons par personne** (2026-10-10, correction P1 :
 le supplément d'un enfant, d'un réduit ou d'un profil gratuit exige un
 billet de base de même catégorie/profil ; famille et groupe couverts ;
@@ -935,6 +942,19 @@ existantes ont été rattachées à la pièce correspondant à leur horaire.
   `test_booking.py` test 13 : preuve HTTP (dont 11 lignes acceptées).
   Limites restantes : borne par champ, pas de borne temporelle ni de
   rate-limiting (hors périmètre M5 sécurité).
+- ✅ **Règle accompagnateurs PMR corrigée** (2026-10-10, audit PR #6) :
+  le ratio « max 1 accompagnateur par porteur » était décompté en
+  **lignes** au lieu de personnes — le supplément du même accompagnateur
+  était rejeté (faux positif) et un add-on `disability` gonflait le
+  compte de porteurs (faux négatif). Désormais : décompte en personnes
+  (lignes de base uniquement — un add-on conserve le profil sans créer
+  de personne) + exigence de **co-présence** (l'accompagnateur partage
+  une séance ou un accès musée avec un porteur — même `session_id`, ou
+  même événement musée et même `visit_date` — contrôle agrégé sans
+  appariement nominatif). POS : garde par ligne remplacée par le miroir
+  agrégé + co-présence (`cart.ts`/`pmrLineError`, vitest) ; web : garde
+  de ratio ajoutée (la co-présence y est garantie par construction —
+  même produit, mêmes séances). 9 tests pytest ajoutés/adaptés.
 
 ### Backlog (feuille de route non figée)
 

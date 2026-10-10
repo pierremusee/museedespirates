@@ -48,6 +48,7 @@ import {
   lineEstimate,
   linePersons,
   passSuggestion,
+  pmrLineError,
   sessionCountOf,
   type CartLine,
   type Product,
@@ -456,9 +457,9 @@ export function PosTerminal({
         return `places insuffisantes (${cap} restantes)`;
       }
     }
-    const c = countsOf(line);
-    if (c.pmr_companion > c.disability) {
-      return "1 accompagnateur PMR par personne en invalidité";
+    const pmrErr = pmrLineError(line, lines, visitDate);
+    if (pmrErr) {
+      return pmrErr;
     }
     if (
       line.product.kind === "group" &&
